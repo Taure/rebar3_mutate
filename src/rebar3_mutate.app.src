@@ -1,0 +1,10 @@
+{application, rebar3_mutate, [
+    {description, "Mutation testing plugin for rebar3"},
+    {vsn, "git"},
+    {registered, []},
+    {applications, [kernel, stdlib, compiler, syntax_tools]},
+    {env, []},
+    {modules, []},
+    {licenses, ["MIT"]},
+    {links, [{"GitHub", "https://github.com/Taure/rebar3_mutate"}]}
+]}.
