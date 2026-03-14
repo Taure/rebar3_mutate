@@ -21,7 +21,8 @@ run_mutant(Module, MutatedForms, TestSpec, Timeout) ->
 load_and_test(Module, Binary, TestSpec, Timeout) ->
     %% Save original beam path for restore
     OldPath = code:which(Module),
-    %% Hot-load the mutant
+    %% Purge any old code, then load the mutant
+    code:purge(Module),
     {module, Module} = code:load_binary(Module, "mutant", Binary),
     Result = run_tests(TestSpec, Module, Timeout),
     %% Restore original
@@ -79,6 +80,7 @@ run_tests({ct, Suite}, _Module, Timeout) ->
     end.
 
 restore_module(Module, OldPath) when is_list(OldPath) ->
+    code:purge(Module),
     code:load_file(Module);
 restore_module(_Module, _) ->
     ok.
