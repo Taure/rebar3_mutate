@@ -247,7 +247,113 @@ multiple_operators_test() ->
     ?assertNot(lists:member(op_relational, OpTypes)).
 
 all_operators_count_test() ->
-    ?assertEqual(8, length(rebar3_mutate_operators:all())).
+    ?assertEqual(14, length(rebar3_mutate_operators:all())).
+
+%%====================================================================
+%% Guard
+%%====================================================================
+
+guard_is_atom_test() ->
+    Node = erl_syntax:application(erl_syntax:atom(is_atom), [erl_syntax:variable('X')]),
+    [{op_guard, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_guard]),
+    ?assertEqual(atom, erl_syntax:type(Mutated)),
+    ?assertEqual(true, erl_syntax:atom_value(Mutated)).
+
+guard_is_integer_test() ->
+    Node = erl_syntax:application(erl_syntax:atom(is_integer), [erl_syntax:variable('X')]),
+    [{op_guard, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_guard]),
+    ?assertEqual(true, erl_syntax:atom_value(Mutated)).
+
+guard_non_bif_test() ->
+    Node = erl_syntax:application(erl_syntax:atom(my_fun), [erl_syntax:variable('X')]),
+    ?assertEqual([], rebar3_mutate_operators:mutate_node(Node, [op_guard])).
+
+%%====================================================================
+%% Exception
+%%====================================================================
+
+exception_throw_to_error_test() ->
+    Node = erl_syntax:application(erl_syntax:atom(throw), [erl_syntax:atom(reason)]),
+    [{op_exception, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_exception]),
+    ?assertEqual(error, erl_syntax:atom_value(erl_syntax:application_operator(Mutated))).
+
+exception_error_to_throw_test() ->
+    Node = erl_syntax:application(erl_syntax:atom(error), [erl_syntax:atom(reason)]),
+    [{op_exception, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_exception]),
+    ?assertEqual(throw, erl_syntax:atom_value(erl_syntax:application_operator(Mutated))).
+
+exception_exit_to_throw_test() ->
+    Node = erl_syntax:application(erl_syntax:atom(exit), [erl_syntax:atom(reason)]),
+    [{op_exception, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_exception]),
+    ?assertEqual(throw, erl_syntax:atom_value(erl_syntax:application_operator(Mutated))).
+
+exception_wrong_arity_test() ->
+    Node = erl_syntax:application(erl_syntax:atom(throw), [
+        erl_syntax:atom(reason), erl_syntax:atom(extra)
+    ]),
+    ?assertEqual([], rebar3_mutate_operators:mutate_node(Node, [op_exception])).
+
+%%====================================================================
+%% Map
+%%====================================================================
+
+map_remove_field_test() ->
+    F1 = erl_syntax:map_field_assoc(erl_syntax:atom(a), erl_syntax:integer(1)),
+    F2 = erl_syntax:map_field_assoc(erl_syntax:atom(b), erl_syntax:integer(2)),
+    Node = erl_syntax:map_expr([F1, F2]),
+    [{op_map, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_map]),
+    ?assertEqual(map_expr, erl_syntax:type(Mutated)),
+    ?assertEqual(1, length(erl_syntax:map_expr_fields(Mutated))).
+
+map_single_field_no_mutation_test() ->
+    F1 = erl_syntax:map_field_assoc(erl_syntax:atom(a), erl_syntax:integer(1)),
+    Node = erl_syntax:map_expr([F1]),
+    ?assertEqual([], rebar3_mutate_operators:mutate_node(Node, [op_map])).
+
+%%====================================================================
+%% Binary
+%%====================================================================
+
+binary_no_size_test() ->
+    Node = erl_syntax:binary([
+        erl_syntax:binary_field(erl_syntax:variable('X'))
+    ]),
+    ?assertEqual([], rebar3_mutate_operators:mutate_node(Node, [op_binary])).
+
+%%====================================================================
+%% Clause swap
+%%====================================================================
+
+clause_swap_case_test() ->
+    C1 = erl_syntax:clause([erl_syntax:atom(a)], none, [erl_syntax:atom(one)]),
+    C2 = erl_syntax:clause([erl_syntax:atom(b)], none, [erl_syntax:atom(two)]),
+    Node = erl_syntax:case_expr(erl_syntax:variable('X'), [C1, C2]),
+    [{op_clause_swap, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_clause_swap]),
+    ?assertEqual(case_expr, erl_syntax:type(Mutated)),
+    [MC1, MC2] = erl_syntax:case_expr_clauses(Mutated),
+    %% First clause should now be C2 (pattern 'b')
+    [P1] = erl_syntax:clause_patterns(MC1),
+    ?assertEqual(b, erl_syntax:atom_value(P1)),
+    [P2] = erl_syntax:clause_patterns(MC2),
+    ?assertEqual(a, erl_syntax:atom_value(P2)).
+
+clause_swap_single_clause_test() ->
+    C1 = erl_syntax:clause([erl_syntax:atom(a)], none, [erl_syntax:atom(one)]),
+    Node = erl_syntax:case_expr(erl_syntax:variable('X'), [C1]),
+    ?assertEqual([], rebar3_mutate_operators:mutate_node(Node, [op_clause_swap])).
+
+clause_swap_non_case_test() ->
+    Node = erl_syntax:integer(42),
+    ?assertEqual([], rebar3_mutate_operators:mutate_node(Node, [op_clause_swap])).
+
+%%====================================================================
+%% Receive
+%%====================================================================
+
+receive_no_timeout_test() ->
+    C1 = erl_syntax:clause([erl_syntax:atom(msg)], none, [erl_syntax:atom(ok)]),
+    Node = erl_syntax:receive_expr([C1]),
+    ?assertEqual([], rebar3_mutate_operators:mutate_node(Node, [op_receive])).
 
 %%====================================================================
 %% Helpers

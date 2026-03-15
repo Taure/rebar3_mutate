@@ -2,7 +2,7 @@
     {description, "Mutation testing plugin for rebar3"},
     {vsn, "git"},
     {registered, []},
-    {applications, [kernel, stdlib, compiler, syntax_tools]},
+    {applications, [kernel, stdlib, compiler, syntax_tools, crypto, tools]},
     {env, []},
     {modules, []},
     {licenses, ["MIT"]},

@@ -1,6 +1,6 @@
 -module(rebar3_mutate_runner).
 
--export([run_mutant/4]).
+-export([run_mutant/4, run_baseline/3]).
 
 -spec run_mutant(atom(), [erl_parse:abstract_form()], eunit | {ct, atom()}, pos_integer()) ->
     killed | survived | timed_out | {compile_error, term()}.
@@ -12,6 +12,20 @@ run_mutant(Module, MutatedForms, TestSpec, Timeout) ->
             load_and_test(Module, Binary, TestSpec, Timeout);
         {error, Errors, _Warnings} ->
             {compile_error, Errors}
+    end.
+
+-spec run_baseline(eunit | {ct, atom()}, atom(), pos_integer()) ->
+    {ok, pos_integer()} | {error, term()}.
+run_baseline(TestSpec, Module, Timeout) ->
+    Start = erlang:monotonic_time(millisecond),
+    case run_tests(TestSpec, Module, Timeout) of
+        survived ->
+            Duration = erlang:monotonic_time(millisecond) - Start,
+            {ok, Duration};
+        killed ->
+            {error, {tests_failed, Module}};
+        timed_out ->
+            {error, {tests_timed_out, Module}}
     end.
 
 %%====================================================================
