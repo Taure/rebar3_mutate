@@ -81,6 +81,7 @@ run_tests({ct, Suite}, _Module, Timeout) ->
 
 restore_module(Module, OldPath) when is_list(OldPath) ->
     code:purge(Module),
-    code:load_file(Module);
+    _ = code:load_file(Module),
+    ok;
 restore_module(_Module, _) ->
     ok.

@@ -32,7 +32,7 @@ arithmetic_rem_test() ->
     ?assertEqual('div', get_op(Mutated)).
 
 arithmetic_no_match_test() ->
-    Node = erl_syntax:integer(42),
+    Node = erl_syntax:atom(hello),
     ?assertEqual([], rebar3_mutate_operators:mutate_node(Node, [op_arithmetic])).
 
 %%====================================================================
@@ -59,6 +59,26 @@ relational_exact_neq_test() ->
     [{op_relational, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_relational]),
     ?assertEqual('=:=', get_op(Mutated)).
 
+relational_gte_test() ->
+    Node = make_infix(erl_syntax:integer(1), '>=', erl_syntax:integer(2)),
+    [{op_relational, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_relational]),
+    ?assertEqual('=<', get_op(Mutated)).
+
+relational_lte_test() ->
+    Node = make_infix(erl_syntax:integer(1), '=<', erl_syntax:integer(2)),
+    [{op_relational, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_relational]),
+    ?assertEqual('>=', get_op(Mutated)).
+
+relational_struct_eq_test() ->
+    Node = make_infix(erl_syntax:integer(1), '==', erl_syntax:integer(2)),
+    [{op_relational, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_relational]),
+    ?assertEqual('/=', get_op(Mutated)).
+
+relational_struct_neq_test() ->
+    Node = make_infix(erl_syntax:integer(1), '/=', erl_syntax:integer(2)),
+    [{op_relational, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_relational]),
+    ?assertEqual('==', get_op(Mutated)).
+
 relational_no_match_test() ->
     Node = make_infix(erl_syntax:integer(1), '+', erl_syntax:integer(2)),
     ?assertEqual([], rebar3_mutate_operators:mutate_node(Node, [op_relational])).
@@ -70,10 +90,8 @@ relational_no_match_test() ->
 boolean_andalso_test() ->
     Node = make_infix(erl_syntax:atom(true), 'andalso', erl_syntax:atom(false)),
     Results = rebar3_mutate_operators:mutate_node(Node, [op_boolean]),
-    %% andalso -> orelse, plus true->false and false->true on the children
     OpNames = [Op || {Op, _} <- Results],
     ?assert(lists:member(op_boolean, OpNames)),
-    %% The infix mutation should be andalso -> orelse
     [{op_boolean, Mutated} | _] = Results,
     ?assertEqual('orelse', get_op(Mutated)).
 
@@ -123,16 +141,113 @@ return_other_atom_test() ->
     ?assertEqual([], rebar3_mutate_operators:mutate_node(Node, [op_return_value])).
 
 %%====================================================================
+%% Statement delete
+%%====================================================================
+
+statement_delete_application_test() ->
+    Node = erl_syntax:application(erl_syntax:atom(foo), [erl_syntax:integer(1)]),
+    [{op_statement_delete, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [
+        op_statement_delete
+    ]),
+    ?assertEqual(atom, erl_syntax:type(Mutated)),
+    ?assertEqual(ok, erl_syntax:atom_value(Mutated)).
+
+statement_delete_no_match_test() ->
+    Node = erl_syntax:integer(42),
+    ?assertEqual([], rebar3_mutate_operators:mutate_node(Node, [op_statement_delete])).
+
+%%====================================================================
+%% Constant
+%%====================================================================
+
+constant_integer_test() ->
+    Node = erl_syntax:integer(5),
+    Results = rebar3_mutate_operators:mutate_node(Node, [op_constant]),
+    Values = [erl_syntax:integer_value(M) || {op_constant, M} <- Results],
+    ?assert(lists:member(6, Values)),
+    ?assert(lists:member(4, Values)),
+    ?assert(lists:member(0, Values)).
+
+constant_zero_test() ->
+    Node = erl_syntax:integer(0),
+    Results = rebar3_mutate_operators:mutate_node(Node, [op_constant]),
+    Values = [erl_syntax:integer_value(M) || {op_constant, M} <- Results],
+    ?assert(lists:member(1, Values)),
+    ?assert(lists:member(-1, Values)),
+    ?assertNot(lists:member(0, Values)).
+
+constant_no_match_test() ->
+    Node = erl_syntax:atom(hello),
+    ?assertEqual([], rebar3_mutate_operators:mutate_node(Node, [op_constant])).
+
+%%====================================================================
+%% Negate condition
+%%====================================================================
+
+negate_condition_andalso_test() ->
+    Node = make_infix(erl_syntax:atom(true), 'andalso', erl_syntax:atom(false)),
+    [{op_negate_condition, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [
+        op_negate_condition
+    ]),
+    ?assertEqual(prefix_expr, erl_syntax:type(Mutated)),
+    ?assertEqual('not', erl_syntax:operator_name(erl_syntax:prefix_expr_operator(Mutated))).
+
+negate_condition_not_removal_test() ->
+    Inner = erl_syntax:atom(true),
+    Node = erl_syntax:prefix_expr(erl_syntax:operator('not'), Inner),
+    [{op_negate_condition, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [
+        op_negate_condition
+    ]),
+    ?assertEqual(atom, erl_syntax:type(Mutated)),
+    ?assertEqual(true, erl_syntax:atom_value(Mutated)).
+
+negate_condition_no_match_test() ->
+    Node = erl_syntax:integer(42),
+    ?assertEqual([], rebar3_mutate_operators:mutate_node(Node, [op_negate_condition])).
+
+%%====================================================================
+%% List
+%%====================================================================
+
+list_concat_test() ->
+    Node = make_infix(erl_syntax:list([]), '++', erl_syntax:list([])),
+    [{op_list, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_list]),
+    ?assertEqual('--', get_op(Mutated)).
+
+list_subtract_test() ->
+    Node = make_infix(erl_syntax:list([]), '--', erl_syntax:list([])),
+    [{op_list, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_list]),
+    ?assertEqual('++', get_op(Mutated)).
+
+list_hd_to_tl_test() ->
+    Node = erl_syntax:application(erl_syntax:atom(hd), [erl_syntax:list([erl_syntax:integer(1)])]),
+    [{op_list, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_list]),
+    ?assertEqual(application, erl_syntax:type(Mutated)),
+    ?assertEqual(tl, erl_syntax:atom_value(erl_syntax:application_operator(Mutated))).
+
+list_tl_to_hd_test() ->
+    Node = erl_syntax:application(erl_syntax:atom(tl), [erl_syntax:list([erl_syntax:integer(1)])]),
+    [{op_list, Mutated}] = rebar3_mutate_operators:mutate_node(Node, [op_list]),
+    ?assertEqual(application, erl_syntax:type(Mutated)),
+    ?assertEqual(hd, erl_syntax:atom_value(erl_syntax:application_operator(Mutated))).
+
+list_no_match_test() ->
+    Node = erl_syntax:integer(42),
+    ?assertEqual([], rebar3_mutate_operators:mutate_node(Node, [op_list])).
+
+%%====================================================================
 %% Multiple operators
 %%====================================================================
 
 multiple_operators_test() ->
-    %% A '+' node should match arithmetic but not relational
     Node = make_infix(erl_syntax:integer(1), '+', erl_syntax:integer(2)),
     Results = rebar3_mutate_operators:mutate_node(Node, rebar3_mutate_operators:all()),
     OpTypes = [Op || {Op, _} <- Results],
     ?assert(lists:member(op_arithmetic, OpTypes)),
     ?assertNot(lists:member(op_relational, OpTypes)).
+
+all_operators_count_test() ->
+    ?assertEqual(8, length(rebar3_mutate_operators:all())).
 
 %%====================================================================
 %% Helpers

@@ -106,13 +106,8 @@ extract_module([]) -> undefined.
 
 get_line(Node) ->
     Pos = erl_syntax:get_pos(Node),
-    case Pos of
-        Line when is_integer(Line) -> Line;
-        {Line, _} ->
-            Line;
-        _ ->
-            case erl_anno:is_anno(Pos) of
-                true -> erl_anno:line(Pos);
-                false -> 0
-            end
+    try
+        erl_anno:line(Pos)
+    catch
+        _:_ -> 0
     end.
