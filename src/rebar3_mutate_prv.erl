@@ -6,6 +6,8 @@
 
 -define(PROVIDER, mutate).
 -define(DEPS, [{default, app_discovery}, {default, compile}]).
+-define(DEFAULT_TIMEOUT, 5000).
+-define(DEFAULT_WORKERS, erlang:system_info(schedulers)).
 
 init(State) ->
     Provider = providers:create([
@@ -17,10 +19,19 @@ init(State) ->
         {example, "rebar3 mutate --module my_module"},
         {opts, [
             {module, $m, "module", string, "Target module(s), comma-separated"},
-            {timeout, $t, "timeout", integer, "Per-mutant timeout in ms (default: 5000)"},
+            {exclude, $x, "exclude", string, "Modules to exclude, comma-separated"},
+            {timeout, $t, "timeout", integer,
+                "Per-mutant timeout in ms (default: " ++
+                    integer_to_list(?DEFAULT_TIMEOUT) ++ ")"},
             {operators, $o, "operators", string,
                 "Operators to use, comma-separated (default: all). "
-                "Available: op_arithmetic, op_relational, op_boolean, op_return_value"}
+                "Available: op_arithmetic, op_relational, op_boolean, op_return_value, "
+                "op_statement_delete, op_constant, op_negate_condition, op_list"},
+            {test_framework, $f, "test-framework", string, "Test framework: eunit (default) or ct"},
+            {min_score, $s, "min-score", float, "Minimum mutation score (0-100). Fail if below"},
+            {format, undefined, "format", string, "Output format: console (default) or json"},
+            {workers, $w, "workers", integer,
+                "Number of parallel workers (default: scheduler count)"}
         ]},
         {short_desc, "Run mutation testing on project modules"},
         {desc,
@@ -31,9 +42,14 @@ init(State) ->
 
 do(State) ->
     {Args, _} = rebar_state:command_parsed_args(State),
-    Timeout = proplists:get_value(timeout, Args, 5000),
+    Timeout = proplists:get_value(timeout, Args, ?DEFAULT_TIMEOUT),
     Operators = parse_operators(proplists:get_value(operators, Args, undefined)),
     TargetModules = parse_modules(proplists:get_value(module, Args, undefined)),
+    ExcludeModules = parse_modules(proplists:get_value(exclude, Args, undefined)),
+    TestSpec = parse_test_framework(proplists:get_value(test_framework, Args, undefined)),
+    MinScore = proplists:get_value(min_score, Args, undefined),
+    Format = parse_format(proplists:get_value(format, Args, undefined)),
+    Workers = proplists:get_value(workers, Args, ?DEFAULT_WORKERS),
 
     Apps = rebar_state:project_apps(State),
     AllResults = lists:foldl(
@@ -41,10 +57,14 @@ do(State) ->
             AppDir = rebar_app_info:dir(AppInfo),
             SrcDir = filename:join(AppDir, "src"),
             IncludeDir = filename:join(AppDir, "include"),
-            SrcFiles = find_source_files(SrcDir, TargetModules),
+            SrcFiles = find_source_files(SrcDir, TargetModules, ExcludeModules),
             lists:foldl(
                 fun(File, InnerAcc) ->
-                    case process_file(File, [IncludeDir, AppDir], Operators, Timeout) of
+                    case
+                        process_file(
+                            File, [IncludeDir, AppDir], Operators, TestSpec, Timeout, Workers
+                        )
+                    of
                         {ok, Module, Results} ->
                             [{Module, Results} | InnerAcc];
                         {error, Reason} ->
@@ -62,16 +82,40 @@ do(State) ->
 
     TotalKilled = lists:sum([length([R || {_, R} <- Rs, R =:= killed]) || {_, Rs} <- AllResults]),
     TotalMutants = lists:sum([length(Rs) || {_, Rs} <- AllResults]),
+    TotalCompileErrors = lists:sum([
+        length([R || {_, R} <- Rs, is_compile_error(R)])
+     || {_, Rs} <- AllResults
+    ]),
 
-    lists:foreach(
-        fun({Module, Results}) ->
-            rebar3_mutate_report:format(Module, Results)
-        end,
-        lists:reverse(AllResults)
-    ),
+    case Format of
+        console ->
+            lists:foreach(
+                fun({Module, Results}) ->
+                    rebar3_mutate_report:format(Module, Results)
+                end,
+                lists:reverse(AllResults)
+            ),
+            rebar_api:info("~nOverall: ~B/~B mutants killed", [TotalKilled, TotalMutants]);
+        json ->
+            Json = rebar3_mutate_report:format_json(lists:reverse(AllResults)),
+            io:put_chars(Json),
+            io:nl()
+    end,
 
-    rebar_api:info("~nOverall: ~B/~B mutants killed", [TotalKilled, TotalMutants]),
-    {ok, State}.
+    OverallScore = score(TotalKilled, TotalMutants, TotalCompileErrors),
+    case MinScore of
+        undefined ->
+            {ok, State};
+        Threshold when OverallScore >= Threshold ->
+            {ok, State};
+        Threshold ->
+            {error,
+                {?MODULE,
+                    io_lib:format(
+                        "Mutation score ~.1f% is below minimum ~.1f%",
+                        [OverallScore, Threshold]
+                    )}}
+    end.
 
 format_error(Reason) ->
     io_lib:format("~p", [Reason]).
@@ -80,38 +124,119 @@ format_error(Reason) ->
 %% Internal
 %%====================================================================
 
-process_file(File, IncludeDirs, Operators, Timeout) ->
+process_file(File, IncludeDirs, Operators, TestSpec, Timeout, Workers) ->
     case rebar3_mutate_ast:parse_file(File, IncludeDirs) of
         {ok, Module, Forms} ->
             Points = rebar3_mutate_ast:mutation_points(Forms, Operators),
             rebar_api:info("~s: ~B mutation points found", [Module, length(Points)]),
-            Results = lists:map(
-                fun(Point) ->
-                    MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, Point, Operators),
-                    Result = rebar3_mutate_runner:run_mutant(
-                        Module, MutatedForms, eunit, Timeout
-                    ),
-                    {Point, Result}
-                end,
-                Points
-            ),
+            Results = run_parallel(Points, Forms, Module, Operators, TestSpec, Timeout, Workers),
             {ok, Module, Results};
         {error, _} = Err ->
             Err
     end.
 
-find_source_files(SrcDir, all) ->
-    filelib:wildcard(filename:join(SrcDir, "*.erl"));
-find_source_files(SrcDir, Modules) ->
-    lists:filtermap(
-        fun(Mod) ->
-            File = filename:join(SrcDir, atom_to_list(Mod) ++ ".erl"),
-            case filelib:is_file(File) of
-                true -> {true, File};
-                false -> false
-            end
+run_parallel(Points, Forms, Module, Operators, TestSpec, Timeout, Workers) when Workers > 1 ->
+    Tasks = lists:map(
+        fun(Point) ->
+            {Point, Forms, Operators, Module, TestSpec, Timeout}
         end,
-        Modules
+        Points
+    ),
+    pmap(
+        fun({Point, Fs, Ops, _Mod, TS, To}) ->
+            MutatedForms = rebar3_mutate_ast:apply_mutation(Fs, Point, Ops),
+            Result = rebar3_mutate_runner:run_mutant(Module, MutatedForms, TS, To),
+            print_progress(Result),
+            {Point, Result}
+        end,
+        Tasks,
+        Workers
+    );
+run_parallel(Points, Forms, Module, Operators, TestSpec, Timeout, _Workers) ->
+    lists:map(
+        fun(Point) ->
+            MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, Point, Operators),
+            Result = rebar3_mutate_runner:run_mutant(Module, MutatedForms, TestSpec, Timeout),
+            print_progress(Result),
+            {Point, Result}
+        end,
+        Points
+    ).
+
+pmap(Fun, Tasks, MaxWorkers) ->
+    Parent = self(),
+    Ref = make_ref(),
+    IndexedTasks = lists:zip(lists:seq(1, length(Tasks)), Tasks),
+    %% Chunk into groups of MaxWorkers
+    Chunks = chunk(IndexedTasks, MaxWorkers),
+    Results = lists:flatmap(
+        fun(Chunk) ->
+            Pids = lists:map(
+                fun({Idx, Task}) ->
+                    spawn_monitor(fun() ->
+                        Parent ! {Ref, Idx, Fun(Task)}
+                    end)
+                end,
+                Chunk
+            ),
+            collect(Ref, Pids, [])
+        end,
+        Chunks
+    ),
+    [R || {_, R} <- lists:keysort(1, Results)].
+
+collect(_Ref, [], Acc) ->
+    Acc;
+collect(Ref, Pids, Acc) ->
+    receive
+        {Ref, Idx, Result} ->
+            collect(Ref, Pids, [{Idx, Result} | Acc]);
+        {'DOWN', MRef, process, _Pid, normal} ->
+            collect(Ref, lists:keydelete(MRef, 2, Pids), Acc);
+        {'DOWN', MRef, process, _Pid, Reason} ->
+            rebar_api:warn("Worker crashed: ~p", [Reason]),
+            collect(Ref, lists:keydelete(MRef, 2, Pids), Acc)
+    end.
+
+chunk([], _N) ->
+    [];
+chunk(List, N) ->
+    {Head, Tail} = safe_split(N, List),
+    [Head | chunk(Tail, N)].
+
+safe_split(N, List) when length(List) =< N ->
+    {List, []};
+safe_split(N, List) ->
+    lists:split(N, List).
+
+print_progress(killed) -> io:put_chars(standard_error, ".");
+print_progress(survived) -> io:put_chars(standard_error, "S");
+print_progress(timed_out) -> io:put_chars(standard_error, "T");
+print_progress({compile_error, _}) -> io:put_chars(standard_error, "E").
+
+find_source_files(SrcDir, all, ExcludeModules) ->
+    Files = filelib:wildcard(filename:join([SrcDir, "**", "*.erl"])),
+    exclude_files(Files, ExcludeModules);
+find_source_files(SrcDir, Modules, ExcludeModules) ->
+    AllFiles = filelib:wildcard(filename:join([SrcDir, "**", "*.erl"])),
+    Filtered = lists:filter(
+        fun(File) ->
+            Mod = list_to_atom(filename:basename(File, ".erl")),
+            lists:member(Mod, Modules)
+        end,
+        AllFiles
+    ),
+    exclude_files(Filtered, ExcludeModules).
+
+exclude_files(Files, all) ->
+    Files;
+exclude_files(Files, ExcludeModules) ->
+    lists:filter(
+        fun(File) ->
+            Mod = list_to_atom(filename:basename(File, ".erl")),
+            not lists:member(Mod, ExcludeModules)
+        end,
+        Files
     ).
 
 parse_modules(undefined) -> all;
@@ -121,3 +246,34 @@ parse_operators(undefined) ->
     rebar3_mutate_operators:all();
 parse_operators(Str) ->
     [list_to_atom(string:trim(S)) || S <- string:split(Str, ",", all)].
+
+parse_test_framework(undefined) ->
+    eunit;
+parse_test_framework("eunit") ->
+    eunit;
+parse_test_framework("ct") ->
+    ct;
+parse_test_framework(Other) ->
+    rebar_api:warn("Unknown test framework '~s', defaulting to eunit", [Other]),
+    eunit.
+
+parse_format(undefined) ->
+    console;
+parse_format("console") ->
+    console;
+parse_format("json") ->
+    json;
+parse_format(Other) ->
+    rebar_api:warn("Unknown format '~s', defaulting to console", [Other]),
+    console.
+
+score(_Killed, 0, _CompileErrors) ->
+    0.0;
+score(Killed, Total, CompileErrors) ->
+    case Total - CompileErrors of
+        0 -> 0.0;
+        Testable -> (Killed / Testable) * 100
+    end.
+
+is_compile_error({compile_error, _}) -> true;
+is_compile_error(_) -> false.
