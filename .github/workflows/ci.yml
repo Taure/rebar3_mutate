@@ -10,13 +10,19 @@ permissions:
 
 jobs:
   ci:
-    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@v1
     with:
+      enable-dependency-submission: true
+      enable-summary: true
+      enable-sbom-scan: true
+      enable-sbom: true
+      enable-coverage: true
+      enable-audit: true
       otp-version: '28'
       enable-ex-doc: true
 
   release:
     needs: ci
     if: ${{ github.event_name == 'push' }}
-    uses: Taure/erlang-ci/.github/workflows/release.yml@v2
+    uses: Taure/erlang-ci/.github/workflows/release.yml@v1
     secrets: inherit
