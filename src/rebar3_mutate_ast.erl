@@ -1,6 +1,6 @@
 -module(rebar3_mutate_ast).
 
--export([parse_file/2, mutation_points/2, apply_mutation/3, describe_mutation/1]).
+-export([parse_file/2, mutation_points/2, apply_mutation/3, describe_mutation/1, get_point_line/1]).
 
 -record(mutation_point, {
     index :: non_neg_integer(),
@@ -95,6 +95,9 @@ describe_mutation(#mutation_point{operator = Op, line = Line, original = Orig, m
             _:_ -> "?"
         end,
     io_lib:format("line ~B [~s] ~s -> ~s", [Line, Op, OrigStr, MutStr]).
+
+-spec get_point_line(mutation_point()) -> non_neg_integer().
+get_point_line(#mutation_point{line = Line}) -> Line.
 
 %%====================================================================
 %% Internal
