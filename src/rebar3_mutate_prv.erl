@@ -31,7 +31,9 @@ init(State) ->
             {min_score, $s, "min-score", float, "Minimum mutation score (0-100). Fail if below"},
             {format, undefined, "format", string, "Output format: console (default) or json"},
             {workers, $w, "workers", integer,
-                "Number of parallel workers (default: scheduler count)"}
+                "Number of parallel workers (default: scheduler count)"},
+            {diff, $d, "diff", string,
+                "Only mutate lines changed since base ref (e.g. origin/main)"}
         ]},
         {short_desc, "Run mutation testing on project modules"},
         {desc,
@@ -50,6 +52,7 @@ do(State) ->
     MinScore = proplists:get_value(min_score, Args, undefined),
     Format = parse_format(proplists:get_value(format, Args, undefined)),
     Workers = proplists:get_value(workers, Args, ?DEFAULT_WORKERS),
+    DiffFilter = parse_diff(proplists:get_value(diff, Args, undefined)),
 
     Apps = rebar_state:project_apps(State),
     AllResults = lists:foldl(
@@ -57,12 +60,19 @@ do(State) ->
             AppDir = rebar_app_info:dir(AppInfo),
             SrcDir = filename:join(AppDir, "src"),
             IncludeDir = filename:join(AppDir, "include"),
-            SrcFiles = find_source_files(SrcDir, TargetModules, ExcludeModules),
+            SrcFiles0 = find_source_files(SrcDir, TargetModules, ExcludeModules),
+            SrcFiles = filter_files_by_diff(SrcFiles0, DiffFilter),
             lists:foldl(
                 fun(File, InnerAcc) ->
                     case
                         process_file(
-                            File, [IncludeDir, AppDir], Operators, TestSpec, Timeout, Workers
+                            File,
+                            [IncludeDir, AppDir],
+                            Operators,
+                            TestSpec,
+                            Timeout,
+                            Workers,
+                            DiffFilter
                         )
                     of
                         {ok, Module, Results} ->
@@ -124,11 +134,17 @@ format_error(Reason) ->
 %% Internal
 %%====================================================================
 
-process_file(File, IncludeDirs, Operators, TestSpec, Timeout, Workers) ->
+process_file(File, IncludeDirs, Operators, TestSpec, Timeout, Workers, DiffFilter) ->
     case rebar3_mutate_ast:parse_file(File, IncludeDirs) of
         {ok, Module, Forms} ->
-            Points = rebar3_mutate_ast:mutation_points(Forms, Operators),
-            rebar_api:info("~s: ~B mutation points found", [Module, length(Points)]),
+            AllPoints = rebar3_mutate_ast:mutation_points(Forms, Operators),
+            Points = filter_by_diff(AllPoints, File, DiffFilter),
+            case {length(AllPoints), length(Points)} of
+                {Total, Total} ->
+                    rebar_api:info("~s: ~B mutation points found", [Module, Total]);
+                {Total, Filtered} ->
+                    rebar_api:info("~s: ~B/~B mutation points in diff", [Module, Filtered, Total])
+            end,
             Results = run_parallel(Points, Forms, Module, Operators, TestSpec, Timeout, Workers),
             {ok, Module, Results};
         {error, _} = Err ->
@@ -256,6 +272,58 @@ parse_test_framework("ct") ->
 parse_test_framework(Other) ->
     rebar_api:warn("Unknown test framework '~s', defaulting to eunit", [Other]),
     eunit.
+
+parse_diff(undefined) ->
+    none;
+parse_diff(BaseRef) ->
+    rebar_api:info("Diff mode: only mutating lines changed since ~s", [BaseRef]),
+    case rebar3_mutate_diff:changed_lines(BaseRef) of
+        {ok, Changes} ->
+            {diff, Changes};
+        {error, Reason} ->
+            rebar_api:error("Failed to parse git diff: ~p", [Reason]),
+            erlang:error({diff_failed, Reason})
+    end.
+
+filter_by_diff(Points, _File, none) ->
+    Points;
+filter_by_diff(Points, File, {diff, Changes}) ->
+    %% Match file path suffix — git diff gives repo-relative paths,
+    %% while File is an absolute path
+    case find_matching_file(File, Changes) of
+        {ok, Ranges} ->
+            [P || P <- Points, in_ranges(rebar3_mutate_ast:get_point_line(P), Ranges)];
+        none ->
+            []
+    end.
+
+filter_files_by_diff(Files, none) ->
+    Files;
+filter_files_by_diff(Files, {diff, Changes}) ->
+    [F || F <- Files, find_matching_file(F, Changes) =/= none].
+
+find_matching_file(_File, Changes) when map_size(Changes) =:= 0 ->
+    none;
+find_matching_file(File, Changes) ->
+    maps:fold(
+        fun(DiffPath, Ranges, Acc) ->
+            case Acc of
+                {ok, _} ->
+                    Acc;
+                none ->
+                    case string:find(File, DiffPath, trailing) of
+                        nomatch -> none;
+                        _ -> {ok, Ranges}
+                    end
+            end
+        end,
+        none,
+        Changes
+    ).
+
+in_ranges(_Line, []) -> false;
+in_ranges(Line, [{Start, End} | _]) when Line >= Start, Line =< End -> true;
+in_ranges(Line, [_ | Rest]) -> in_ranges(Line, Rest).
 
 parse_format(undefined) ->
     console;
