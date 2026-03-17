@@ -152,21 +152,33 @@ process_file(File, IncludeDirs, Operators, TestSpec, Timeout, Workers, DiffFilte
     end.
 
 run_parallel(Points, Forms, Module, Operators, TestSpec, Timeout, Workers) when Workers > 1 ->
-    Tasks = lists:map(
+    %% Phase 1: compile all mutants in parallel (safe — pure computation)
+    CompileTasks = lists:map(
         fun(Point) ->
-            {Point, Forms, Operators, Module, TestSpec, Timeout}
+            {Point, Forms, Operators}
         end,
         Points
     ),
-    pmap(
-        fun({Point, Fs, Ops, _Mod, TS, To}) ->
+    Compiled = pmap(
+        fun({Point, Fs, Ops}) ->
             MutatedForms = rebar3_mutate_ast:apply_mutation(Fs, Point, Ops),
-            Result = rebar3_mutate_runner:run_mutant(Module, MutatedForms, TS, To),
-            print_progress(Result),
-            {Point, Result}
+            {Point, rebar3_mutate_runner:compile_mutant(Module, MutatedForms)}
         end,
-        Tasks,
+        CompileTasks,
         Workers
+    ),
+    %% Phase 2: load and test sequentially (BEAM only supports 2 module versions)
+    lists:map(
+        fun
+            ({Point, {ok, Binary}}) ->
+                Result = rebar3_mutate_runner:load_and_test(Module, Binary, TestSpec, Timeout),
+                print_progress(Result),
+                {Point, Result};
+            ({Point, {compile_error, _} = Err}) ->
+                print_progress(Err),
+                {Point, Err}
+        end,
+        Compiled
     );
 run_parallel(Points, Forms, Module, Operators, TestSpec, Timeout, _Workers) ->
     lists:map(
