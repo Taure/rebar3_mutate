@@ -1,23 +1,31 @@
 -module(rebar3_mutate_runner).
 
--export([run_mutant/4]).
+-export([compile_mutant/2, run_mutant/4, load_and_test/4]).
 
--spec run_mutant(atom(), [erl_parse:abstract_form()], eunit | {ct, atom()}, pos_integer()) ->
-    killed | survived | timed_out | {compile_error, term()}.
-run_mutant(Module, MutatedForms, TestSpec, Timeout) ->
+-spec compile_mutant(atom(), [erl_parse:abstract_form()]) ->
+    {ok, binary()} | {compile_error, term()}.
+compile_mutant(Module, MutatedForms) ->
     case compile:forms(MutatedForms, [binary, return_errors]) of
         {ok, Module, Binary} ->
-            load_and_test(Module, Binary, TestSpec, Timeout);
+            {ok, Binary};
         {ok, Module, Binary, _Warnings} ->
-            load_and_test(Module, Binary, TestSpec, Timeout);
+            {ok, Binary};
         {error, Errors, _Warnings} ->
             {compile_error, Errors}
     end.
 
-%%====================================================================
-%% Internal
-%%====================================================================
+-spec run_mutant(atom(), [erl_parse:abstract_form()], eunit | {ct, atom()}, pos_integer()) ->
+    killed | survived | timed_out | {compile_error, term()}.
+run_mutant(Module, MutatedForms, TestSpec, Timeout) ->
+    case compile_mutant(Module, MutatedForms) of
+        {ok, Binary} ->
+            load_and_test(Module, Binary, TestSpec, Timeout);
+        {compile_error, _} = Err ->
+            Err
+    end.
 
+-spec load_and_test(atom(), binary(), eunit | {ct, atom()}, pos_integer()) ->
+    killed | survived | timed_out.
 load_and_test(Module, Binary, TestSpec, Timeout) ->
     %% Save original beam path for restore
     OldPath = code:which(Module),
