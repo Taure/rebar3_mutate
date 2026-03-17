@@ -116,6 +116,8 @@ do(State) ->
     case MinScore of
         undefined ->
             {ok, State};
+        _Threshold when TotalMutants =:= 0 ->
+            {ok, State};
         Threshold when OverallScore >= Threshold ->
             {ok, State};
         Threshold ->
