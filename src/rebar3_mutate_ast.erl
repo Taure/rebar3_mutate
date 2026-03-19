@@ -28,7 +28,7 @@ parse_file(File, IncludeDirs) ->
 -spec mutation_points([erl_parse:abstract_form()], [rebar3_mutate_operators:operator()]) ->
     [mutation_point()].
 mutation_points(Forms, Operators) ->
-    Tree = erl_syntax:form_list(Forms),
+    Tree = erl_syntax:form_list(filter_eqwalizer(Forms)),
     {_, Points} = erl_syntax_lib:fold(
         fun(Node, Acc) ->
             Mutations = rebar3_mutate_operators:mutate_node(Node, Operators),
@@ -58,7 +58,7 @@ mutation_points(Forms, Operators) ->
 ]) ->
     [erl_parse:abstract_form()].
 apply_mutation(Forms, #mutation_point{index = TargetIdx, mutated = Mutated} = _Point, Operators) ->
-    Tree = erl_syntax:form_list(Forms),
+    Tree = erl_syntax:form_list(filter_eqwalizer(Forms)),
     {NewTree, _} = erl_syntax_lib:mapfold(
         fun(Node, Idx) ->
             Mutations = rebar3_mutate_operators:mutate_node(Node, Operators),
@@ -106,6 +106,12 @@ get_point_line(#mutation_point{line = Line}) -> Line.
 extract_module([{attribute, _, module, Mod} | _]) -> Mod;
 extract_module([_ | Rest]) -> extract_module(Rest);
 extract_module([]) -> undefined.
+
+filter_eqwalizer(Forms) ->
+    [F || F <- Forms, not is_eqwalizer(F)].
+
+is_eqwalizer({attribute, _, eqwalizer, _}) -> true;
+is_eqwalizer(_) -> false.
 
 get_line(Node) ->
     Pos = erl_syntax:get_pos(Node),
