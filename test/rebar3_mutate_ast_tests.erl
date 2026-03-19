@@ -38,6 +38,17 @@ mutation_points_respect_operator_filter_test() ->
     ?assert(length(ArithOnly) > 0),
     file:delete(File).
 
+eqwalizer_attributes_skipped_test() ->
+    File = write_temp_module_with_eqwalizer(),
+    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, []),
+    Points = rebar3_mutate_ast:mutation_points(Forms, rebar3_mutate_operators:all()),
+    Lines = [rebar3_mutate_ast:get_point_line(P) || P <- Points],
+    %% Line 3 is the eqwalizer attribute - should not appear
+    ?assertNot(lists:member(3, Lines)),
+    %% But we should still get mutations from the actual code
+    ?assert(length(Points) > 0),
+    file:delete(File).
+
 %%====================================================================
 %% Helpers
 %%====================================================================
@@ -53,5 +64,17 @@ write_temp_module() ->
         "compare(A, B) when A > B -> greater;\n"
         "compare(_, _) -> other.\n"
         "check(X) -> X =:= ok andalso true.\n",
+    ok = file:write_file(File, Content),
+    File.
+
+write_temp_module_with_eqwalizer() ->
+    Dir = filename:join(["/tmp", "rebar3_mutate_test"]),
+    filelib:ensure_dir(filename:join(Dir, "dummy")),
+    File = filename:join(Dir, "test_target.erl"),
+    Content =
+        "-module(test_target).\n"
+        "-export([add/2]).\n"
+        "-eqwalizer(fixme).\n"
+        "add(A, B) -> A + B.\n",
     ok = file:write_file(File, Content),
     File.
