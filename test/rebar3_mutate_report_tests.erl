@@ -22,6 +22,37 @@ format_json_score_test() ->
     Json = iolist_to_binary(rebar3_mutate_report:format_json(Results)),
     ?assert(binary:match(Json, <<"66.7">>) =/= nomatch).
 
+format_json_multiline_description_test() ->
+    %% Build an expression long enough to span multiple lines when pretty-printed
+    Orig = erl_syntax:application(
+        erl_syntax:atom(join_with_sep),
+        [
+            erl_syntax:list_comp(
+                erl_syntax:application(
+                    erl_syntax:atom(atom_to_binary),
+                    [
+                        erl_syntax:variable('SomeVeryLongVariableName'),
+                        erl_syntax:atom(utf8)
+                    ]
+                ),
+                [
+                    erl_syntax:generator(
+                        erl_syntax:variable('SomeVeryLongVariableName'),
+                        erl_syntax:variable('ColumnListVariable')
+                    )
+                ]
+            ),
+            erl_syntax:binary([erl_syntax:binary_field(erl_syntax:string("_"))])
+        ]
+    ),
+    Mutated = erl_syntax:atom(ok),
+    Point = {mutation_point, 1, op_statement_delete, 82, Orig, Mutated},
+    Results = [{test_mod, [{Point, survived}]}],
+    Json = iolist_to_binary(rebar3_mutate_report:format_json(Results)),
+    %% JSON must not contain literal newlines — they must be escaped
+    ?assertEqual(nomatch, binary:match(Json, <<"\n">>)),
+    ?assert(binary:match(Json, <<"\\n">>) =/= nomatch).
+
 %%====================================================================
 %% Helpers
 %%====================================================================

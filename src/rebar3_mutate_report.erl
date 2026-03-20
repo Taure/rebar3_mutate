@@ -136,12 +136,11 @@ encode_value(V) when is_binary(V) -> [<<"\"">>, escape_json(V), <<"\"">>];
 encode_value({array, Items}) -> [<<"[">>, lists:join(<<",">>, Items), <<"]">>].
 
 escape_json(Bin) ->
-    binary:replace(
-        binary:replace(Bin, <<"\\">>, <<"\\\\">>, [global]),
-        <<"\"">>,
-        <<"\\\"">>,
-        [global]
-    ).
+    B1 = binary:replace(Bin, <<"\\">>, <<"\\\\">>, [global]),
+    B2 = binary:replace(B1, <<"\"">>, <<"\\\"">>, [global]),
+    B3 = binary:replace(B2, <<"\n">>, <<"\\n">>, [global]),
+    B4 = binary:replace(B3, <<"\r">>, <<"\\r">>, [global]),
+    binary:replace(B4, <<"\t">>, <<"\\t">>, [global]).
 
 is_compile_error({compile_error, _}) -> true;
 is_compile_error(_) -> false.
