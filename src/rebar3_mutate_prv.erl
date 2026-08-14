@@ -4,8 +4,6 @@
 
 -export([init/1, do/1, format_error/1]).
 
--dialyzer({nowarn_function, drain/5}).
-
 -define(PROVIDER, mutate).
 -define(DEPS, [{default, app_discovery}, {default, compile}]).
 -define(DEFAULT_TIMEOUT, 5000).
@@ -175,13 +173,13 @@ log_points(Module, Total, Filtered) ->
 %% loaded and tested one at a time because the code server only holds two
 %% versions of a module.
 run_points(Points, Forms, Module, TestSpec, Timeout, Workers) ->
-    Compiled = pmap(
+    Compiled = rebar3_mutate_pool:pmap(
         fun(Point) ->
             MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, Point),
             rebar3_mutate_runner:compile_mutant(Module, MutatedForms)
         end,
         Points,
-        max(Workers, 1)
+        Workers
     ),
     lists:map(
         fun
@@ -204,36 +202,6 @@ marker(survived) -> "S";
 marker(timed_out) -> "T";
 marker({compile_error, _}) -> "E";
 marker({skipped, _}) -> "-".
-
-%%====================================================================
-%% Bounded worker pool
-%%====================================================================
-
-%% Results ride the worker's exit reason, so a result can never be lost to a
-%% race with its own DOWN message, and a worker that dies without producing one
-%% becomes a skipped mutant rather than silently vanishing from the report.
-pmap(Fun, Tasks, MaxWorkers) ->
-    Indexed = lists:zip(lists:seq(1, length(Tasks)), Tasks),
-    Results = drain(Fun, Indexed, MaxWorkers, #{}, #{}),
-    [maps:get(Index, Results) || {Index, _Task} <- Indexed].
-
-drain(_Fun, [], _Max, InFlight, Results) when map_size(InFlight) =:= 0 ->
-    Results;
-drain(Fun, [{Index, Task} | Rest], Max, InFlight, Results) when map_size(InFlight) < Max ->
-    {_Pid, MRef} = spawn_monitor(fun() -> exit({mutant_result, Fun(Task)}) end),
-    drain(Fun, Rest, Max, InFlight#{MRef => Index}, Results);
-drain(Fun, Pending, Max, InFlight, Results) ->
-    receive
-        {'DOWN', MRef, process, _Pid, {mutant_result, Value}} ->
-            Index = maps:get(MRef, InFlight),
-            drain(Fun, Pending, Max, maps:remove(MRef, InFlight), Results#{Index => Value});
-        {'DOWN', MRef, process, _Pid, Reason} ->
-            Index = maps:get(MRef, InFlight),
-            rebar_api:warn("Mutant worker crashed: ~p", [Reason]),
-            drain(Fun, Pending, Max, maps:remove(MRef, InFlight), Results#{
-                Index => {skipped, {worker_crash, Reason}}
-            })
-    end.
 
 %%====================================================================
 %% Reporting and gating

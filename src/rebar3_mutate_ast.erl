@@ -76,8 +76,8 @@ collect(Node, Path, Source, ParentLine, Operators) ->
     Line = node_line(Node, ParentLine),
     Children = lists:append([
         collect(Child, Path ++ [{GroupIndex, ChildIndex}], Source, Line, Operators)
-     || {GroupIndex, Group} <- enumerate(erl_syntax:subtrees(Node)),
-        {ChildIndex, Child} <- enumerate(Group)
+     || {GroupIndex, Group} <- lists:enumerate(erl_syntax:subtrees(Node)),
+        {ChildIndex, Child} <- lists:enumerate(Group)
     ]),
     Own = [
         #mutation_point{
@@ -164,9 +164,6 @@ render(Node) ->
     catch
         _:_ -> "?"
     end.
-
-enumerate(List) ->
-    lists:zip(lists:seq(1, length(List)), List).
 
 set_nth(1, [_ | Rest], Value) -> [Value | Rest];
 set_nth(N, [Head | Rest], Value) -> [Head | set_nth(N - 1, Rest, Value)].

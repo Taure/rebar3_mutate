@@ -2,8 +2,6 @@
 
 -export([compile_mutant/2, run_mutant/4, load_and_test/4, run_baseline/3, has_tests/2]).
 
--dialyzer({nowarn_function, in_worker/2}).
-
 -type test_spec() :: eunit | {ct, atom()}.
 -type verdict() :: killed | survived | timed_out | {compile_error, term()} | {skipped, term()}.
 
@@ -76,10 +74,10 @@ run_baseline(Module, TestSpec, Timeout) ->
 %% baseline does not by itself mean anything ran.
 -spec has_tests(atom(), test_spec()) -> boolean().
 has_tests(Module, eunit) ->
-    Tests = list_to_atom(atom_to_list(Module) ++ "_tests"),
-    case code:ensure_loaded(Tests) of
-        {module, Tests} -> true;
-        {error, _} -> exports_test_function(Module)
+    Tests = atom_to_list(Module) ++ "_tests.beam",
+    case code:where_is_file(Tests) of
+        non_existing -> exports_test_function(Module);
+        _Path -> true
     end;
 has_tests(_Module, {ct, Suite}) ->
     case code:ensure_loaded(Suite) of
@@ -119,10 +117,15 @@ execute({ct, Suite}, _Module, Timeout) ->
 execute(Other, _Module, _Timeout) ->
     {error, {unknown_test_framework, Other}}.
 
+%% The worker sends before it exits, and signals between two processes keep
+%% their order, so the result is always ahead of the DOWN in the mailbox.
 in_worker(Fun, Timeout) ->
-    {Pid, MRef} = spawn_monitor(fun() -> exit({mutate_test_result, Fun()}) end),
+    Parent = self(),
+    Ref = make_ref(),
+    {Pid, MRef} = spawn_monitor(fun() -> Parent ! {Ref, Fun()} end),
     receive
-        {'DOWN', MRef, process, Pid, {mutate_test_result, Result}} ->
+        {Ref, Result} ->
+            erlang:demonitor(MRef, [flush]),
             Result;
         {'DOWN', MRef, process, Pid, _Reason} ->
             fail

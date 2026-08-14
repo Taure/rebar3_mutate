@@ -10,29 +10,19 @@
 
 -spec count(results()) -> counts().
 count(Results) ->
-    lists:foldl(
-        fun({_Point, Verdict}, Acc) ->
-            Key = verdict_key(Verdict),
-            Acc#{Key := maps:get(Key, Acc) + 1, total := maps:get(total, Acc) + 1}
-        end,
-        #{
-            killed => 0,
-            survived => 0,
-            timed_out => 0,
-            compile_errors => 0,
-            skipped => 0,
-            total => 0
-        },
-        Results
-    ).
+    Verdicts = [verdict_key(Verdict) || {_Point, Verdict} <- Results],
+    #{
+        killed => tally(killed, Verdicts),
+        survived => tally(survived, Verdicts),
+        timed_out => tally(timed_out, Verdicts),
+        compile_errors => tally(compile_errors, Verdicts),
+        skipped => tally(skipped, Verdicts),
+        total => length(Verdicts)
+    }.
 
 -spec total_count([{atom(), results()}]) -> counts().
 total_count(AllResults) ->
-    lists:foldl(
-        fun({_Module, Results}, Acc) -> merge_counts(Acc, count(Results)) end,
-        count([]),
-        AllResults
-    ).
+    count(lists:append([Results || {_Module, Results} <- AllResults])).
 
 %% Mutants that never ran a test - compile errors and skips - are excluded from
 %% the denominator. Console output and the --min-score gate both come from
@@ -138,8 +128,8 @@ verdict_key(timed_out) -> timed_out;
 verdict_key({compile_error, _}) -> compile_errors;
 verdict_key({skipped, _}) -> skipped.
 
-merge_counts(A, B) ->
-    maps:map(fun(Key, Value) -> Value + maps:get(Key, B) end, A).
+tally(Key, Verdicts) ->
+    length([Verdict || Verdict <- Verdicts, Verdict =:= Key]).
 
 excluded_suffix(Counts) ->
     Parts =
