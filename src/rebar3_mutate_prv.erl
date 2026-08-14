@@ -4,10 +4,13 @@
 
 -export([init/1, do/1, format_error/1]).
 
+-dialyzer({nowarn_function, drain/5}).
+
 -define(PROVIDER, mutate).
 -define(DEPS, [{default, app_discovery}, {default, compile}]).
 -define(DEFAULT_TIMEOUT, 5000).
 -define(DEFAULT_WORKERS, erlang:system_info(schedulers)).
+-define(BASELINE_TIMEOUT_FLOOR, 30000).
 
 init(State) ->
     Provider = providers:create([
@@ -28,7 +31,9 @@ init(State) ->
                 "Available: op_arithmetic, op_relational, op_boolean, op_return_value, "
                 "op_statement_delete, op_constant, op_negate_condition, op_list"},
             {test_framework, $f, "test-framework", string, "Test framework: eunit (default) or ct"},
-            {min_score, $s, "min-score", float, "Minimum mutation score (0-100). Fail if below"},
+            {suite, undefined, "suite", string,
+                "Common Test suite to run (default: <module>_SUITE)"},
+            {min_score, $s, "min-score", string, "Minimum mutation score (0-100). Fail if below"},
             {format, undefined, "format", string, "Output format: console (default) or json"},
             {workers, $w, "workers", integer,
                 "Number of parallel workers (default: scheduler count)"},
@@ -43,231 +48,253 @@ init(State) ->
     {ok, rebar_state:add_provider(State, Provider)}.
 
 do(State) ->
-    {Args, _} = rebar_state:command_parsed_args(State),
-    Timeout = proplists:get_value(timeout, Args, ?DEFAULT_TIMEOUT),
-    Operators = parse_operators(proplists:get_value(operators, Args, undefined)),
-    TargetModules = parse_modules(proplists:get_value(module, Args, undefined)),
-    ExcludeModules = parse_modules(proplists:get_value(exclude, Args, undefined)),
-    TestSpec = parse_test_framework(proplists:get_value(test_framework, Args, undefined)),
-    MinScore = proplists:get_value(min_score, Args, undefined),
-    Format = parse_format(proplists:get_value(format, Args, undefined)),
-    Workers = proplists:get_value(workers, Args, ?DEFAULT_WORKERS),
-    DiffFilter = parse_diff(proplists:get_value(diff, Args, undefined)),
-
-    Apps = rebar_state:project_apps(State),
-    AllResults = lists:foldl(
-        fun(AppInfo, Acc) ->
-            AppDir = rebar_app_info:dir(AppInfo),
-            SrcDir = filename:join(AppDir, "src"),
-            IncludeDir = filename:join(AppDir, "include"),
-            SrcFiles0 = find_source_files(SrcDir, TargetModules, ExcludeModules),
-            SrcFiles = filter_files_by_diff(SrcFiles0, DiffFilter),
-            lists:foldl(
-                fun(File, InnerAcc) ->
-                    case
-                        process_file(
-                            File,
-                            [IncludeDir, AppDir],
-                            Operators,
-                            TestSpec,
-                            Timeout,
-                            Workers,
-                            DiffFilter
-                        )
-                    of
-                        {ok, Module, Results} ->
-                            [{Module, Results} | InnerAcc];
-                        {error, Reason} ->
-                            rebar_api:warn("Skipping ~s: ~p", [File, Reason]),
-                            InnerAcc
-                    end
-                end,
-                Acc,
-                SrcFiles
-            )
-        end,
-        [],
-        Apps
-    ),
-
-    TotalKilled = lists:sum([length([R || {_, R} <- Rs, R =:= killed]) || {_, Rs} <- AllResults]),
-    TotalMutants = lists:sum([length(Rs) || {_, Rs} <- AllResults]),
-    TotalCompileErrors = lists:sum([
-        length([R || {_, R} <- Rs, is_compile_error(R)])
-     || {_, Rs} <- AllResults
-    ]),
-
-    case Format of
-        console ->
-            lists:foreach(
-                fun({Module, Results}) ->
-                    rebar3_mutate_report:format(Module, Results)
-                end,
-                lists:reverse(AllResults)
-            ),
-            rebar_api:info("~nOverall: ~B/~B mutants killed", [TotalKilled, TotalMutants]);
-        json ->
-            Json = rebar3_mutate_report:format_json(lists:reverse(AllResults)),
-            io:put_chars(Json),
-            io:nl()
-    end,
-
-    OverallScore = score(TotalKilled, TotalMutants, TotalCompileErrors),
-    case MinScore of
-        undefined ->
-            {ok, State};
-        _Threshold when TotalMutants =:= 0 ->
-            {ok, State};
-        Threshold when OverallScore >= Threshold ->
-            {ok, State};
-        Threshold ->
-            {error,
-                {?MODULE,
-                    io_lib:format(
-                        "Mutation score ~.1f% is below minimum ~.1f%",
-                        [OverallScore, Threshold]
-                    )}}
+    try
+        run(State, options(State))
+    catch
+        throw:{mutate_error, Message} ->
+            {error, {?MODULE, Message}}
     end.
 
+format_error(Reason) when is_list(Reason) ->
+    Reason;
 format_error(Reason) ->
     io_lib:format("~p", [Reason]).
 
 %%====================================================================
-%% Internal
+%% Run
 %%====================================================================
 
-process_file(File, IncludeDirs, Operators, TestSpec, Timeout, Workers, DiffFilter) ->
+options(State) ->
+    {Args, _} = rebar_state:command_parsed_args(State),
+    #{
+        timeout => proplists:get_value(timeout, Args, ?DEFAULT_TIMEOUT),
+        operators => parse_operators(proplists:get_value(operators, Args, undefined)),
+        modules => parse_modules(proplists:get_value(module, Args, undefined)),
+        exclude => parse_modules(proplists:get_value(exclude, Args, undefined)),
+        framework => parse_test_framework(proplists:get_value(test_framework, Args, undefined)),
+        suite => proplists:get_value(suite, Args, undefined),
+        min_score => parse_min_score(proplists:get_value(min_score, Args, undefined)),
+        format => parse_format(proplists:get_value(format, Args, undefined)),
+        workers => proplists:get_value(workers, Args, ?DEFAULT_WORKERS),
+        diff => parse_diff(proplists:get_value(diff, Args, undefined))
+    }.
+
+run(State, Opts) ->
+    Targets = collect_targets(rebar_state:project_apps(State), Opts),
+    ok = check_targets(Targets, Opts),
+    Outcomes = [process_file(File, IncludeDirs, Opts) || {File, IncludeDirs} <- Targets],
+    Scored = [{Module, Results} || {ok, Module, Results} <- Outcomes],
+    Skipped = [{Module, Reason} || {skipped, Module, Reason} <- Outcomes],
+    Failed = [{Module, Reason} || {baseline_failed, Module, Reason} <- Outcomes],
+    report(Scored, Skipped, Failed, Opts),
+    gate(State, Scored, Failed, Opts).
+
+collect_targets(Apps, #{modules := Modules, exclude := Exclude, diff := DiffFilter}) ->
+    lists:append([
+        begin
+            AppDir = rebar_app_info:dir(AppInfo),
+            SrcDir = filename:join(AppDir, "src"),
+            IncludeDirs = [filename:join(AppDir, "include"), AppDir],
+            Files = find_source_files(SrcDir, Modules, Exclude),
+            [{File, IncludeDirs} || File <- filter_files_by_diff(Files, DiffFilter)]
+        end
+     || AppInfo <- Apps
+    ]).
+
+%% An explicit -m that matches nothing used to run zero mutants, which the
+%% --min-score gate then treated as a pass.
+check_targets([], #{modules := Modules}) when Modules =/= all ->
+    throw(
+        {mutate_error,
+            io_lib:format(
+                "No source files matched --module ~s",
+                [lists:join(",", [atom_to_list(M) || M <- Modules])]
+            )}
+    );
+check_targets(_Targets, _Opts) ->
+    ok.
+
+process_file(File, IncludeDirs, Opts) ->
     case rebar3_mutate_ast:parse_file(File, IncludeDirs) of
         {ok, Module, Forms} ->
-            AllPoints = rebar3_mutate_ast:mutation_points(Forms, Operators),
-            Points = filter_by_diff(AllPoints, File, DiffFilter),
-            case {length(AllPoints), length(Points)} of
-                {Total, Total} ->
-                    rebar_api:info("~s: ~B mutation points found", [Module, Total]);
-                {Total, Filtered} ->
-                    rebar_api:info("~s: ~B/~B mutation points in diff", [Module, Filtered, Total])
-            end,
-            Results = run_parallel(Points, Forms, Module, Operators, TestSpec, Timeout, Workers),
-            {ok, Module, Results};
-        {error, _} = Err ->
-            Err
+            process_module(Module, Forms, File, Opts);
+        {error, Reason} ->
+            rebar_api:warn("Skipping ~s: ~p", [File, Reason]),
+            {skipped, list_to_atom(filename:basename(File, ".erl")), {parse_failed, Reason}}
     end.
 
-run_parallel(Points, Forms, Module, Operators, TestSpec, Timeout, Workers) when Workers > 1 ->
-    %% Phase 1: compile all mutants in parallel (safe — pure computation)
-    CompileTasks = lists:map(
-        fun(Point) ->
-            {Point, Forms, Operators}
-        end,
-        Points
+process_module(Module, Forms, File, Opts) ->
+    case resolve_test_spec(Module, Opts) of
+        {error, Reason} ->
+            rebar_api:warn("~s: skipped (~p)", [Module, Reason]),
+            {skipped, Module, Reason};
+        {ok, TestSpec} ->
+            baseline_then_mutate(Module, Forms, File, TestSpec, Opts)
+    end.
+
+baseline_then_mutate(Module, Forms, File, TestSpec, #{timeout := Timeout} = Opts) ->
+    BaselineTimeout = max(Timeout * 4, ?BASELINE_TIMEOUT_FLOOR),
+    case rebar3_mutate_runner:run_baseline(Module, TestSpec, BaselineTimeout) of
+        no_tests ->
+            rebar_api:warn("~s: no tests found, skipped", [Module]),
+            {skipped, Module, no_tests};
+        {failed, Reason} ->
+            rebar_api:error("~s: tests do not pass unmutated (~p)", [Module, Reason]),
+            {baseline_failed, Module, Reason};
+        {ok, BaselineMs} ->
+            mutate_module(Module, Forms, File, TestSpec, BaselineMs, Opts)
+    end.
+
+mutate_module(Module, Forms, File, TestSpec, BaselineMs, Opts) ->
+    #{operators := Operators, workers := Workers, diff := DiffFilter} = Opts,
+    AllPoints = rebar3_mutate_ast:mutation_points(Forms, Operators),
+    Points = filter_by_diff(AllPoints, File, DiffFilter),
+    log_points(Module, length(AllPoints), length(Points)),
+    Timeout = mutant_timeout(Module, maps:get(timeout, Opts), BaselineMs),
+    Results = run_points(Points, Forms, Module, TestSpec, Timeout, Workers),
+    {ok, Module, Results}.
+
+%% A per-mutant timeout below the suite's own runtime turns every mutant into a
+%% timeout, so the whole run reports nothing usable.
+mutant_timeout(Module, Timeout, BaselineMs) when BaselineMs >= Timeout ->
+    Raised = BaselineMs * 5,
+    rebar_api:warn(
+        "~s: unmutated suite takes ~Bms, raising per-mutant timeout ~Bms -> ~Bms",
+        [Module, BaselineMs, Timeout, Raised]
     ),
+    Raised;
+mutant_timeout(_Module, Timeout, _BaselineMs) ->
+    Timeout.
+
+log_points(Module, Total, Total) ->
+    rebar_api:info("~s: ~B mutation points found", [Module, Total]);
+log_points(Module, Total, Filtered) ->
+    rebar_api:info("~s: ~B/~B mutation points in diff", [Module, Filtered, Total]).
+
+%% Mutants are compiled in parallel because that is pure computation, then
+%% loaded and tested one at a time because the code server only holds two
+%% versions of a module.
+run_points(Points, Forms, Module, TestSpec, Timeout, Workers) ->
     Compiled = pmap(
-        fun({Point, Fs, Ops}) ->
-            MutatedForms = rebar3_mutate_ast:apply_mutation(Fs, Point),
-            {Point, rebar3_mutate_runner:compile_mutant(Module, MutatedForms)}
+        fun(Point) ->
+            MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, Point),
+            rebar3_mutate_runner:compile_mutant(Module, MutatedForms)
         end,
-        CompileTasks,
-        Workers
+        Points,
+        max(Workers, 1)
     ),
-    %% Phase 2: load and test sequentially (BEAM only supports 2 module versions)
     lists:map(
         fun
             ({Point, {ok, Binary}}) ->
-                Result = rebar3_mutate_runner:load_and_test(Module, Binary, TestSpec, Timeout),
-                print_progress(Result),
-                {Point, Result};
-            ({Point, {compile_error, _} = Err}) ->
-                print_progress(Err),
-                {Point, Err}
+                progress(
+                    Point, rebar3_mutate_runner:load_and_test(Module, Binary, TestSpec, Timeout)
+                );
+            ({Point, Other}) ->
+                progress(Point, Other)
         end,
-        Compiled
-    );
-run_parallel(Points, Forms, Module, Operators, TestSpec, Timeout, _Workers) ->
-    lists:map(
-        fun(Point) ->
-            MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, Point),
-            Result = rebar3_mutate_runner:run_mutant(Module, MutatedForms, TestSpec, Timeout),
-            print_progress(Result),
-            {Point, Result}
-        end,
-        Points
+        lists:zip(Points, Compiled)
     ).
 
-pmap(Fun, Tasks, MaxWorkers) ->
-    Parent = self(),
-    Ref = make_ref(),
-    IndexedTasks = lists:zip(lists:seq(1, length(Tasks)), Tasks),
-    %% Chunk into groups of MaxWorkers
-    Chunks = chunk(IndexedTasks, MaxWorkers),
-    Results = lists:flatmap(
-        fun(Chunk) ->
-            Pids = lists:map(
-                fun({Idx, Task}) ->
-                    spawn_monitor(fun() ->
-                        Parent ! {Ref, Idx, Fun(Task)}
-                    end)
-                end,
-                Chunk
-            ),
-            collect(Ref, Pids, [])
-        end,
-        Chunks
-    ),
-    [R || {_, R} <- lists:keysort(1, Results)].
+progress(Point, Result) ->
+    io:put_chars(standard_error, marker(Result)),
+    {Point, Result}.
 
-collect(_Ref, [], Acc) ->
-    Acc;
-collect(Ref, Pids, Acc) ->
+marker(killed) -> ".";
+marker(survived) -> "S";
+marker(timed_out) -> "T";
+marker({compile_error, _}) -> "E";
+marker({skipped, _}) -> "-".
+
+%%====================================================================
+%% Bounded worker pool
+%%====================================================================
+
+%% Results ride the worker's exit reason, so a result can never be lost to a
+%% race with its own DOWN message, and a worker that dies without producing one
+%% becomes a skipped mutant rather than silently vanishing from the report.
+pmap(Fun, Tasks, MaxWorkers) ->
+    Indexed = lists:zip(lists:seq(1, length(Tasks)), Tasks),
+    Results = drain(Fun, Indexed, MaxWorkers, #{}, #{}),
+    [maps:get(Index, Results) || {Index, _Task} <- Indexed].
+
+drain(_Fun, [], _Max, InFlight, Results) when map_size(InFlight) =:= 0 ->
+    Results;
+drain(Fun, [{Index, Task} | Rest], Max, InFlight, Results) when map_size(InFlight) < Max ->
+    {_Pid, MRef} = spawn_monitor(fun() -> exit({mutant_result, Fun(Task)}) end),
+    drain(Fun, Rest, Max, InFlight#{MRef => Index}, Results);
+drain(Fun, Pending, Max, InFlight, Results) ->
     receive
-        {Ref, Idx, Result} ->
-            collect(Ref, Pids, [{Idx, Result} | Acc]);
-        {'DOWN', MRef, process, _Pid, normal} ->
-            collect(Ref, lists:keydelete(MRef, 2, Pids), Acc);
+        {'DOWN', MRef, process, _Pid, {mutant_result, Value}} ->
+            Index = maps:get(MRef, InFlight),
+            drain(Fun, Pending, Max, maps:remove(MRef, InFlight), Results#{Index => Value});
         {'DOWN', MRef, process, _Pid, Reason} ->
-            rebar_api:warn("Worker crashed: ~p", [Reason]),
-            collect(Ref, lists:keydelete(MRef, 2, Pids), Acc)
+            Index = maps:get(MRef, InFlight),
+            rebar_api:warn("Mutant worker crashed: ~p", [Reason]),
+            drain(Fun, Pending, Max, maps:remove(MRef, InFlight), Results#{
+                Index => {skipped, {worker_crash, Reason}}
+            })
     end.
 
-chunk([], _N) ->
-    [];
-chunk(List, N) ->
-    {Head, Tail} = safe_split(N, List),
-    [Head | chunk(Tail, N)].
+%%====================================================================
+%% Reporting and gating
+%%====================================================================
 
-safe_split(N, List) when length(List) =< N ->
-    {List, []};
-safe_split(N, List) ->
-    lists:split(N, List).
-
-print_progress(killed) -> io:put_chars(standard_error, ".");
-print_progress(survived) -> io:put_chars(standard_error, "S");
-print_progress(timed_out) -> io:put_chars(standard_error, "T");
-print_progress({compile_error, _}) -> io:put_chars(standard_error, "E").
-
-find_source_files(SrcDir, all, ExcludeModules) ->
-    Files = filelib:wildcard(filename:join([SrcDir, "**", "*.erl"])),
-    exclude_files(Files, ExcludeModules);
-find_source_files(SrcDir, Modules, ExcludeModules) ->
-    AllFiles = filelib:wildcard(filename:join([SrcDir, "**", "*.erl"])),
-    Filtered = lists:filter(
-        fun(File) ->
-            Mod = list_to_atom(filename:basename(File, ".erl")),
-            lists:member(Mod, Modules)
-        end,
-        AllFiles
+report(Scored, Skipped, Failed, #{format := console}) ->
+    lists:foreach(
+        fun({Module, Results}) -> rebar3_mutate_report:format(Module, Results) end, Scored
     ),
-    exclude_files(Filtered, ExcludeModules).
+    Counts = rebar3_mutate_report:total_count(Scored),
+    lists:foreach(
+        fun({Module, Reason}) -> rebar_api:warn("Skipped ~s: ~p", [Module, Reason]) end,
+        Skipped
+    ),
+    lists:foreach(
+        fun({Module, Reason}) -> rebar_api:error("Baseline failed ~s: ~p", [Module, Reason]) end,
+        Failed
+    ),
+    rebar_api:info("~nOverall: ~B/~B mutants killed (~.1f%)", [
+        maps:get(killed, Counts),
+        rebar3_mutate_report:testable(Counts),
+        rebar3_mutate_report:score(Counts)
+    ]);
+report(Scored, Skipped, Failed, #{format := json}) ->
+    Json = rebar3_mutate_report:format_json(Scored, Skipped ++ Failed),
+    io:nl(),
+    io:put_chars(Json),
+    io:nl().
 
-exclude_files(Files, all) ->
-    Files;
-exclude_files(Files, ExcludeModules) ->
-    lists:filter(
-        fun(File) ->
-            Mod = list_to_atom(filename:basename(File, ".erl")),
-            not lists:member(Mod, ExcludeModules)
-        end,
-        Files
-    ).
+gate(_State, _Scored, [{Module, Reason} | _], _Opts) ->
+    {error,
+        {?MODULE,
+            io_lib:format(
+                "~s: tests do not pass unmutated (~p); mutation results are meaningless",
+                [Module, Reason]
+            )}};
+gate(State, _Scored, [], #{min_score := undefined}) ->
+    {ok, State};
+gate(State, Scored, [], #{min_score := Threshold}) ->
+    Counts = rebar3_mutate_report:total_count(Scored),
+    case rebar3_mutate_report:testable(Counts) of
+        0 ->
+            {ok, State};
+        _ ->
+            Score = rebar3_mutate_report:score(Counts),
+            case Score >= Threshold of
+                true ->
+                    {ok, State};
+                false ->
+                    {error,
+                        {?MODULE,
+                            io_lib:format(
+                                "Mutation score ~.1f% is below minimum ~.1f%",
+                                [Score, Threshold]
+                            )}}
+            end
+    end.
+
+%%====================================================================
+%% Options
+%%====================================================================
 
 parse_modules(undefined) -> all;
 parse_modules(Str) -> [list_to_atom(string:trim(S)) || S <- string:split(Str, ",", all)].
@@ -275,7 +302,19 @@ parse_modules(Str) -> [list_to_atom(string:trim(S)) || S <- string:split(Str, ",
 parse_operators(undefined) ->
     rebar3_mutate_operators:all();
 parse_operators(Str) ->
-    [list_to_atom(string:trim(S)) || S <- string:split(Str, ",", all)].
+    Known = rebar3_mutate_operators:all(),
+    Requested = [list_to_atom(string:trim(S)) || S <- string:split(Str, ",", all)],
+    case Requested -- Known of
+        [] ->
+            Requested;
+        Unknown ->
+            throw(
+                {mutate_error,
+                    io_lib:format("Unknown operator(s): ~s", [
+                        lists:join(",", [atom_to_list(O) || O <- Unknown])
+                    ])}
+            )
+    end.
 
 parse_test_framework(undefined) ->
     eunit;
@@ -284,8 +323,36 @@ parse_test_framework("eunit") ->
 parse_test_framework("ct") ->
     ct;
 parse_test_framework(Other) ->
-    rebar_api:warn("Unknown test framework '~s', defaulting to eunit", [Other]),
-    eunit.
+    throw(
+        {mutate_error, io_lib:format("Unknown test framework '~s'; expected eunit or ct", [Other])}
+    ).
+
+parse_format(undefined) ->
+    console;
+parse_format("console") ->
+    console;
+parse_format("json") ->
+    json;
+parse_format(Other) ->
+    throw({mutate_error, io_lib:format("Unknown format '~s'; expected console or json", [Other])}).
+
+parse_min_score(undefined) ->
+    undefined;
+parse_min_score(Str) ->
+    try
+        list_to_float(Str)
+    catch
+        error:badarg ->
+            try
+                float(list_to_integer(Str))
+            catch
+                error:badarg ->
+                    throw(
+                        {mutate_error,
+                            io_lib:format("Invalid --min-score '~s'; expected a number", [Str])}
+                    )
+            end
+    end.
 
 parse_diff(undefined) ->
     none;
@@ -295,15 +362,47 @@ parse_diff(BaseRef) ->
         {ok, Changes} ->
             {diff, Changes};
         {error, Reason} ->
-            rebar_api:error("Failed to parse git diff: ~p", [Reason]),
-            erlang:error({diff_failed, Reason})
+            throw({mutate_error, io_lib:format("Cannot diff against '~s': ~p", [BaseRef, Reason])})
     end.
+
+resolve_test_spec(_Module, #{framework := eunit}) ->
+    {ok, eunit};
+resolve_test_spec(_Module, #{framework := ct, suite := Suite}) when Suite =/= undefined ->
+    {ok, {ct, list_to_atom(Suite)}};
+resolve_test_spec(Module, #{framework := ct}) ->
+    Suite = list_to_atom(atom_to_list(Module) ++ "_SUITE"),
+    case code:ensure_loaded(Suite) of
+        {module, Suite} -> {ok, {ct, Suite}};
+        {error, _} -> {error, {no_ct_suite, Suite}}
+    end.
+
+%%====================================================================
+%% File selection
+%%====================================================================
+
+find_source_files(SrcDir, Modules, ExcludeModules) ->
+    Files = filelib:wildcard(filename:join([SrcDir, "**", "*.erl"])),
+    Selected =
+        case Modules of
+            all -> Files;
+            _ -> [F || F <- Files, lists:member(module_of(F), Modules)]
+        end,
+    case ExcludeModules of
+        all -> Selected;
+        _ -> [F || F <- Selected, not lists:member(module_of(F), ExcludeModules)]
+    end.
+
+module_of(File) ->
+    list_to_atom(filename:basename(File, ".erl")).
+
+filter_files_by_diff(Files, none) ->
+    Files;
+filter_files_by_diff(Files, {diff, Changes}) ->
+    [F || F <- Files, find_matching_file(F, Changes) =/= none].
 
 filter_by_diff(Points, _File, none) ->
     Points;
 filter_by_diff(Points, File, {diff, Changes}) ->
-    %% Match file path suffix — git diff gives repo-relative paths,
-    %% while File is an absolute path
     case find_matching_file(File, Changes) of
         {ok, Ranges} ->
             [P || P <- Points, in_ranges(rebar3_mutate_ast:get_point_line(P), Ranges)];
@@ -311,25 +410,16 @@ filter_by_diff(Points, File, {diff, Changes}) ->
             []
     end.
 
-filter_files_by_diff(Files, none) ->
-    Files;
-filter_files_by_diff(Files, {diff, Changes}) ->
-    [F || F <- Files, find_matching_file(F, Changes) =/= none].
-
-find_matching_file(_File, Changes) when map_size(Changes) =:= 0 ->
-    none;
 find_matching_file(File, Changes) ->
     maps:fold(
-        fun(DiffPath, Ranges, Acc) ->
-            case Acc of
-                {ok, _} ->
-                    Acc;
-                none ->
-                    case string:find(File, DiffPath, trailing) of
-                        nomatch -> none;
-                        _ -> {ok, Ranges}
-                    end
-            end
+        fun
+            (DiffPath, Ranges, none) ->
+                case rebar3_mutate_diff:matches_path(File, DiffPath) of
+                    true -> {ok, Ranges};
+                    false -> none
+                end;
+            (_DiffPath, _Ranges, Found) ->
+                Found
         end,
         none,
         Changes
@@ -338,24 +428,3 @@ find_matching_file(File, Changes) ->
 in_ranges(_Line, []) -> false;
 in_ranges(Line, [{Start, End} | _]) when Line >= Start, Line =< End -> true;
 in_ranges(Line, [_ | Rest]) -> in_ranges(Line, Rest).
-
-parse_format(undefined) ->
-    console;
-parse_format("console") ->
-    console;
-parse_format("json") ->
-    json;
-parse_format(Other) ->
-    rebar_api:warn("Unknown format '~s', defaulting to console", [Other]),
-    console.
-
-score(_Killed, 0, _CompileErrors) ->
-    0.0;
-score(Killed, Total, CompileErrors) ->
-    case Total - CompileErrors of
-        0 -> 0.0;
-        Testable -> (Killed / Testable) * 100
-    end.
-
-is_compile_error({compile_error, _}) -> true;
-is_compile_error(_) -> false.

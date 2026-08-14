@@ -1,146 +1,184 @@
 -module(rebar3_mutate_report).
 
--export([format/2, format_json/1]).
+-export([format/2, format_json/2, count/1, total_count/1, score/1, testable/1]).
 
--spec format(atom(), [
-    {rebar3_mutate_ast:mutation_point(), killed | survived | timed_out | {compile_error, term()}}
-]) -> ok.
-format(Module, Results) ->
-    Total = length(Results),
-    Killed = length([R || {_, R} <- Results, R =:= killed]),
-    Survived = length([R || {_, R} <- Results, R =:= survived]),
-    TimedOut = length([R || {_, R} <- Results, R =:= timed_out]),
-    CompileErrors = length([R || {_, R} <- Results, is_compile_error(R)]),
-    Score =
-        case Total - CompileErrors of
-            0 -> 0.0;
-            Testable -> (Killed / Testable) * 100
+-type verdict() :: rebar3_mutate_runner:verdict().
+-type results() :: [{rebar3_mutate_ast:mutation_point(), verdict()}].
+-type counts() :: #{atom() => non_neg_integer()}.
+
+-export_type([counts/0, results/0]).
+
+-spec count(results()) -> counts().
+count(Results) ->
+    lists:foldl(
+        fun({_Point, Verdict}, Acc) ->
+            Key = verdict_key(Verdict),
+            Acc#{Key := maps:get(Key, Acc) + 1, total := maps:get(total, Acc) + 1}
         end,
+        #{
+            killed => 0,
+            survived => 0,
+            timed_out => 0,
+            compile_errors => 0,
+            skipped => 0,
+            total => 0
+        },
+        Results
+    ).
 
+-spec total_count([{atom(), results()}]) -> counts().
+total_count(AllResults) ->
+    lists:foldl(
+        fun({_Module, Results}, Acc) -> merge_counts(Acc, count(Results)) end,
+        count([]),
+        AllResults
+    ).
+
+%% Mutants that never ran a test - compile errors and skips - are excluded from
+%% the denominator. Console output and the --min-score gate both come from
+%% here, so the number reported is the number gated on.
+-spec testable(counts()) -> non_neg_integer().
+testable(#{killed := K, survived := S, timed_out := T}) -> K + S + T.
+
+-spec score(counts()) -> float().
+score(Counts) ->
+    case testable(Counts) of
+        0 -> 0.0;
+        Testable -> round(maps:get(killed, Counts) / Testable * 1000) / 10
+    end.
+
+-spec format(atom(), results()) -> ok.
+format(Module, Results) ->
+    Counts = count(Results),
     rebar_api:info("~n~s", [string:copies("=", 60)]),
-    rebar_api:info("Module: ~s (~B mutants, ~B killed, ~B survived, ~B timed out~s)", [
+    rebar_api:info("Module: ~s (~B mutants: ~B killed, ~B survived, ~B timed out~s)", [
         Module,
-        Total,
-        Killed,
-        Survived,
-        TimedOut,
-        case CompileErrors of
-            0 -> "";
-            N -> io_lib:format(", ~B compile errors", [N])
-        end
+        maps:get(total, Counts),
+        maps:get(killed, Counts),
+        maps:get(survived, Counts),
+        maps:get(timed_out, Counts),
+        excluded_suffix(Counts)
     ]),
-    rebar_api:info("Score:  ~.1f%", [Score]),
-
-    case [R || {_, S} = R <- Results, S =:= survived] of
-        [] ->
-            ok;
-        SurvivedList ->
-            rebar_api:info("~nSurviving mutants:", []),
-            lists:foreach(
-                fun({Point, _}) ->
-                    Desc = rebar3_mutate_ast:describe_mutation(Point),
-                    rebar_api:info("  ~s", [Desc])
-                end,
-                SurvivedList
-            )
-    end,
-
-    case [R || {_, S} = R <- Results, S =:= timed_out] of
-        [] ->
-            ok;
-        TimedOutList ->
-            rebar_api:info("~nTimed out mutants:", []),
-            lists:foreach(
-                fun({Point, _}) ->
-                    Desc = rebar3_mutate_ast:describe_mutation(Point),
-                    rebar_api:info("  ~s", [Desc])
-                end,
-                TimedOutList
-            )
-    end,
-
+    rebar_api:info("Score:  ~.1f% (~B killed of ~B testable)", [
+        score(Counts), maps:get(killed, Counts), testable(Counts)
+    ]),
+    list_mutants("Surviving mutants", survived, Results),
+    list_mutants("Timed out mutants", timed_out, Results),
+    list_skipped(Results),
     rebar_api:info("~s~n", [string:copies("=", 60)]),
     ok.
 
--spec format_json([{atom(), [{rebar3_mutate_ast:mutation_point(), term()}]}]) -> iodata().
-format_json(AllResults) ->
-    Modules = lists:map(fun({Module, Results}) -> module_json(Module, Results) end, AllResults),
-    TotalKilled = lists:sum([length([R || {_, R} <- Rs, R =:= killed]) || {_, Rs} <- AllResults]),
-    TotalMutants = lists:sum([length(Rs) || {_, Rs} <- AllResults]),
-    TotalCompileErrors = lists:sum([
-        length([R || {_, R} <- Rs, is_compile_error(R)])
-     || {_, Rs} <- AllResults
-    ]),
-    OverallScore =
-        case TotalMutants - TotalCompileErrors of
-            0 -> 0.0;
-            Testable -> (TotalKilled / Testable) * 100
-        end,
-    encode_object([
-        {<<"overall_score">>, OverallScore},
-        {<<"total_mutants">>, TotalMutants},
-        {<<"total_killed">>, TotalKilled},
-        {<<"modules">>, {array, Modules}}
-    ]).
+-spec format_json([{atom(), results()}], [{atom(), term()}]) -> iodata().
+format_json(AllResults, SkippedModules) ->
+    Counts = total_count(AllResults),
+    encode(
+        {obj, [
+            {~"overall_score", score(Counts)},
+            {~"total_mutants", maps:get(total, Counts)},
+            {~"total_killed", maps:get(killed, Counts)},
+            {~"total_survived", maps:get(survived, Counts)},
+            {~"total_timed_out", maps:get(timed_out, Counts)},
+            {~"total_compile_errors", maps:get(compile_errors, Counts)},
+            {~"total_skipped", maps:get(skipped, Counts)},
+            {~"testable", testable(Counts)},
+            {~"modules", [module_json(M, R) || {M, R} <- AllResults]},
+            {~"skipped_modules", [skipped_json(M, Reason) || {M, Reason} <- SkippedModules]}
+        ]}
+    ).
 
 %%====================================================================
 %% Internal
 %%====================================================================
 
 module_json(Module, Results) ->
-    Total = length(Results),
-    Killed = length([R || {_, R} <- Results, R =:= killed]),
-    Survived = length([R || {_, R} <- Results, R =:= survived]),
-    TimedOut = length([R || {_, R} <- Results, R =:= timed_out]),
-    CompileErrors = length([R || {_, R} <- Results, is_compile_error(R)]),
-    Score =
-        case Total - CompileErrors of
-            0 -> 0.0;
-            Testable -> (Killed / Testable) * 100
-        end,
-    SurvivingMutants = [
-        encode_object([
-            {<<"description">>, iolist_to_binary(rebar3_mutate_ast:describe_mutation(P))}
-        ])
-     || {P, S} <- Results, S =:= survived
-    ],
-    TimedOutMutants = [
-        encode_object([
-            {<<"description">>, iolist_to_binary(rebar3_mutate_ast:describe_mutation(P))}
-        ])
-     || {P, S} <- Results, S =:= timed_out
-    ],
-    encode_object([
-        {<<"module">>, atom_to_binary(Module)},
-        {<<"total">>, Total},
-        {<<"killed">>, Killed},
-        {<<"survived">>, Survived},
-        {<<"timed_out">>, TimedOut},
-        {<<"compile_errors">>, CompileErrors},
-        {<<"score">>, Score},
-        {<<"surviving_mutants">>, {array, SurvivingMutants}},
-        {<<"timed_out_mutants">>, {array, TimedOutMutants}}
-    ]).
+    Counts = count(Results),
+    {obj, [
+        {~"module", atom_to_binary(Module)},
+        {~"total", maps:get(total, Counts)},
+        {~"killed", maps:get(killed, Counts)},
+        {~"survived", maps:get(survived, Counts)},
+        {~"timed_out", maps:get(timed_out, Counts)},
+        {~"compile_errors", maps:get(compile_errors, Counts)},
+        {~"skipped", maps:get(skipped, Counts)},
+        {~"testable", testable(Counts)},
+        {~"score", score(Counts)},
+        {~"surviving_mutants", mutants_json(survived, Results)},
+        {~"timed_out_mutants", mutants_json(timed_out, Results)}
+    ]}.
 
-%% Minimal JSON encoder (no deps needed)
-encode_object(Props) ->
-    Inner = lists:join(<<",">>, [
-        [<<"\"">>, Key, <<"\":">>, encode_value(Val)]
-     || {Key, Val} <- Props
-    ]),
-    [<<"{">>, Inner, <<"}">>].
+skipped_json(Module, Reason) ->
+    {obj, [
+        {~"module", atom_to_binary(Module)},
+        {~"reason", iolist_to_binary(io_lib:format("~p", [Reason]))}
+    ]}.
 
-encode_value(V) when is_integer(V) -> integer_to_binary(V);
-encode_value(V) when is_float(V) -> float_to_binary(V, [{decimals, 1}]);
-encode_value(V) when is_binary(V) -> [<<"\"">>, escape_json(V), <<"\"">>];
-encode_value({array, Items}) -> [<<"[">>, lists:join(<<",">>, Items), <<"]">>].
+mutants_json(Verdict, Results) ->
+    [mutant_json(Point) || {Point, V} <- Results, V =:= Verdict].
 
-escape_json(Bin) ->
-    B1 = binary:replace(Bin, <<"\\">>, <<"\\\\">>, [global]),
-    B2 = binary:replace(B1, <<"\"">>, <<"\\\"">>, [global]),
-    B3 = binary:replace(B2, <<"\n">>, <<"\\n">>, [global]),
-    B4 = binary:replace(B3, <<"\r">>, <<"\\r">>, [global]),
-    binary:replace(B4, <<"\t">>, <<"\\t">>, [global]).
+mutant_json(Point) ->
+    {obj, [
+        {~"file", unicode:characters_to_binary(rebar3_mutate_ast:get_point_file(Point))},
+        {~"line", rebar3_mutate_ast:get_point_line(Point)},
+        {~"operator", atom_to_binary(rebar3_mutate_ast:get_point_operator(Point))},
+        {~"description", iolist_to_binary(rebar3_mutate_ast:describe_mutation(Point))}
+    ]}.
 
-is_compile_error({compile_error, _}) -> true;
-is_compile_error(_) -> false.
+%% json:encode/2 with a tagged-object encoder rather than maps, because the
+%% erlang-ci action anchors on overall_score being the first key and map
+%% iteration order is not the insertion order.
+encode(Term) ->
+    json:encode(Term, fun encoder/2).
+
+encoder({obj, KeyValues}, Encode) -> json:encode_key_value_list(KeyValues, Encode);
+encoder(Other, Encode) -> json:encode_value(Other, Encode).
+
+verdict_key(killed) -> killed;
+verdict_key(survived) -> survived;
+verdict_key(timed_out) -> timed_out;
+verdict_key({compile_error, _}) -> compile_errors;
+verdict_key({skipped, _}) -> skipped.
+
+merge_counts(A, B) ->
+    maps:map(fun(Key, Value) -> Value + maps:get(Key, B) end, A).
+
+excluded_suffix(Counts) ->
+    Parts =
+        [
+            io_lib:format("~B compile errors", [maps:get(compile_errors, Counts)])
+         || maps:get(compile_errors, Counts) > 0
+        ] ++
+            [
+                io_lib:format("~B skipped", [maps:get(skipped, Counts)])
+             || maps:get(skipped, Counts) > 0
+            ],
+    case Parts of
+        [] -> "";
+        _ -> [", ", lists:join(", ", Parts), " excluded"]
+    end.
+
+list_mutants(Heading, Verdict, Results) ->
+    case [Point || {Point, V} <- Results, V =:= Verdict] of
+        [] ->
+            ok;
+        Points ->
+            rebar_api:info("~n~s:", [Heading]),
+            lists:foreach(
+                fun(Point) ->
+                    rebar_api:info("  ~s:~s", [
+                        filename:basename(rebar3_mutate_ast:get_point_file(Point)),
+                        rebar3_mutate_ast:describe_mutation(Point)
+                    ])
+                end,
+                Points
+            )
+    end.
+
+list_skipped(Results) ->
+    case [Reason || {_Point, {skipped, Reason}} <- Results] of
+        [] ->
+            ok;
+        Reasons ->
+            rebar_api:warn("~B mutant(s) skipped: ~p", [
+                length(Reasons), lists:usort(Reasons)
+            ])
+    end.
