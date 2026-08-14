@@ -46,7 +46,7 @@ format_json_multiline_description_test() ->
         ]
     ),
     Mutated = erl_syntax:atom(ok),
-    Point = {mutation_point, 1, op_statement_delete, 82, Orig, Mutated},
+    Point = {mutation_point, [{1, 1}], op_statement_delete, "test_mod.erl", 82, Orig, Mutated},
     Results = [{test_mod, [{Point, survived}]}],
     Json = iolist_to_binary(rebar3_mutate_report:format_json(Results)),
     %% JSON must not contain literal newlines — they must be escaped
@@ -64,4 +64,4 @@ make_point(Idx, Op, Line) ->
     Mutated = erl_syntax:infix_expr(
         erl_syntax:integer(1), erl_syntax:operator('-'), erl_syntax:integer(2)
     ),
-    {mutation_point, Idx, Op, Line, Orig, Mutated}.
+    {mutation_point, [{1, Idx}], Op, "test_mod.erl", Line, Orig, Mutated}.

@@ -168,22 +168,10 @@ apply_operator(op_list, Node) ->
                 _ -> []
             end;
         application ->
-            case erl_syntax:application_operator(Node) of
-                {_, _, {_, _, erlang}, {_, _, hd}} ->
-                    swap_hd_tl(Node, tl);
-                {_, _, {_, _, erlang}, {_, _, tl}} ->
-                    swap_hd_tl(Node, hd);
-                _ ->
-                    case erl_syntax:type(erl_syntax:application_operator(Node)) of
-                        atom ->
-                            case erl_syntax:atom_value(erl_syntax:application_operator(Node)) of
-                                hd -> swap_hd_tl(Node, tl);
-                                tl -> swap_hd_tl(Node, hd);
-                                _ -> []
-                            end;
-                        _ ->
-                            []
-                    end
+            case callee_name(erl_syntax:application_operator(Node)) of
+                {ok, hd} -> swap_hd_tl(Node, tl);
+                {ok, tl} -> swap_hd_tl(Node, hd);
+                _ -> []
             end;
         _ ->
             []
@@ -210,8 +198,47 @@ return_tuple_mutation(Node, Tag, NewAtom, Rest) ->
     NewTag = erl_syntax:copy_pos(Tag, erl_syntax:atom(NewAtom)),
     {op_return_value, erl_syntax:copy_pos(Node, erl_syntax:tuple([NewTag | Rest]))}.
 
+%% Matches a local call or an explicit erlang:F/N call. Reading the callee
+%% through erl_syntax rather than an erl_parse tuple pattern matters: the
+%% pattern only fired on unrevented trees, so the operator produced a
+%% different mutation count depending on how the node reached it.
+callee_name(Operator) ->
+    case erl_syntax:type(Operator) of
+        atom ->
+            {ok, erl_syntax:atom_value(Operator)};
+        module_qualifier ->
+            Module = erl_syntax:module_qualifier_argument(Operator),
+            Function = erl_syntax:module_qualifier_body(Operator),
+            case {erl_syntax:type(Module), erl_syntax:type(Function)} of
+                {atom, atom} ->
+                    case erl_syntax:atom_value(Module) of
+                        erlang -> {ok, erl_syntax:atom_value(Function)};
+                        _ -> none
+                    end;
+                _ ->
+                    none
+            end;
+        _ ->
+            none
+    end.
+
 swap_hd_tl(Node, NewName) ->
     Args = erl_syntax:application_arguments(Node),
-    Operator = erl_syntax:application_operator(Node),
-    NewOp = erl_syntax:copy_pos(Operator, erl_syntax:atom(NewName)),
+    NewOp = rename_callee(erl_syntax:application_operator(Node), NewName),
     [{op_list, erl_syntax:copy_pos(Node, erl_syntax:application(NewOp, Args))}].
+
+rename_callee(Operator, NewName) ->
+    case erl_syntax:type(Operator) of
+        module_qualifier ->
+            Module = erl_syntax:module_qualifier_argument(Operator),
+            Function = erl_syntax:module_qualifier_body(Operator),
+            erl_syntax:copy_pos(
+                Operator,
+                erl_syntax:module_qualifier(
+                    Module,
+                    erl_syntax:copy_pos(Function, erl_syntax:atom(NewName))
+                )
+            );
+        _ ->
+            erl_syntax:copy_pos(Operator, erl_syntax:atom(NewName))
+    end.

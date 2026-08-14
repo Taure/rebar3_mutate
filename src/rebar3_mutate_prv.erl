@@ -163,7 +163,7 @@ run_parallel(Points, Forms, Module, Operators, TestSpec, Timeout, Workers) when 
     ),
     Compiled = pmap(
         fun({Point, Fs, Ops}) ->
-            MutatedForms = rebar3_mutate_ast:apply_mutation(Fs, Point, Ops),
+            MutatedForms = rebar3_mutate_ast:apply_mutation(Fs, Point),
             {Point, rebar3_mutate_runner:compile_mutant(Module, MutatedForms)}
         end,
         CompileTasks,
@@ -185,7 +185,7 @@ run_parallel(Points, Forms, Module, Operators, TestSpec, Timeout, Workers) when 
 run_parallel(Points, Forms, Module, Operators, TestSpec, Timeout, _Workers) ->
     lists:map(
         fun(Point) ->
-            MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, Point, Operators),
+            MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, Point),
             Result = rebar3_mutate_runner:run_mutant(Module, MutatedForms, TestSpec, Timeout),
             print_progress(Result),
             {Point, Result}

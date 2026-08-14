@@ -7,7 +7,7 @@ killed_mutant_test() ->
     Ops = [op_arithmetic],
     Points = rebar3_mutate_ast:mutation_points(Forms, Ops),
     [First | _] = Points,
-    MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First, Ops),
+    MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
     Result = rebar3_mutate_runner:run_mutant(mutate_test_target, MutatedForms, eunit, 5000),
     ?assertEqual(killed, Result),
     cleanup(mutate_test_target, File).
@@ -18,7 +18,7 @@ survived_mutant_test() ->
     Points = rebar3_mutate_ast:mutation_points(Forms, Ops),
     case Points of
         [First | _] ->
-            MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First, Ops),
+            MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
             Result = rebar3_mutate_runner:run_mutant(
                 mutate_test_untested, MutatedForms, eunit, 5000
             ),
@@ -34,7 +34,7 @@ timeout_test() ->
     Points = rebar3_mutate_ast:mutation_points(Forms, Ops),
     case Points of
         [First | _] ->
-            MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First, Ops),
+            MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
             Result = rebar3_mutate_runner:run_mutant(mutate_test_loop, MutatedForms, eunit, 1000),
             ?assertEqual(timed_out, Result);
         [] ->
