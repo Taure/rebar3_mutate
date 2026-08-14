@@ -4,14 +4,14 @@
 
 parse_and_find_mutations_test() ->
     File = write_temp_module(),
-    {ok, test_target, Forms} = rebar3_mutate_ast:parse_file(File, []),
+    {ok, test_target, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
     Points = rebar3_mutate_ast:mutation_points(Forms, rebar3_mutate_operators:all()),
     ?assert(length(Points) > 0),
     file:delete(File).
 
 apply_mutation_compiles_test() ->
     File = write_temp_module(),
-    {ok, test_target, Forms} = rebar3_mutate_ast:parse_file(File, []),
+    {ok, test_target, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
     Ops = rebar3_mutate_operators:all(),
     Points = rebar3_mutate_ast:mutation_points(Forms, Ops),
     [First | _] = Points,
@@ -22,7 +22,7 @@ apply_mutation_compiles_test() ->
 
 describe_mutation_test() ->
     File = write_temp_module(),
-    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, []),
+    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
     Points = rebar3_mutate_ast:mutation_points(Forms, rebar3_mutate_operators:all()),
     [First | _] = Points,
     Desc = rebar3_mutate_ast:describe_mutation(First),
@@ -31,7 +31,7 @@ describe_mutation_test() ->
 
 mutation_points_respect_operator_filter_test() ->
     File = write_temp_module(),
-    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, []),
+    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
     AllPoints = rebar3_mutate_ast:mutation_points(Forms, rebar3_mutate_operators:all()),
     ArithOnly = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic]),
     ?assert(length(ArithOnly) =< length(AllPoints)),
@@ -40,7 +40,7 @@ mutation_points_respect_operator_filter_test() ->
 
 eqwalizer_attributes_skipped_test() ->
     File = write_temp_module_with_eqwalizer(),
-    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, []),
+    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
     Points = rebar3_mutate_ast:mutation_points(Forms, rebar3_mutate_operators:all()),
     Lines = [rebar3_mutate_ast:get_point_line(P) || P <- Points],
     %% Line 3 is the eqwalizer attribute - should not appear
@@ -55,7 +55,7 @@ eqwalizer_attributes_skipped_test() ->
 %% wrong node or nothing at all while still being reported as a real mutant.
 every_point_changes_the_source_test() ->
     File = write_module("drift_target", drift_source()),
-    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, []),
+    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
     Ops = rebar3_mutate_operators:all(),
     Points = rebar3_mutate_ast:mutation_points(Forms, Ops),
     ?assert(length(Points) > 0),
@@ -74,7 +74,7 @@ every_point_changes_the_source_test() ->
 
 qualified_erlang_call_keeps_its_module_test() ->
     File = write_module("drift_target", drift_source()),
-    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, []),
+    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
     Points = rebar3_mutate_ast:mutation_points(Forms, [op_list]),
     ?assertEqual(1, length(Points)),
     [Point] = Points,
@@ -91,7 +91,7 @@ attributes_are_not_mutated_test() ->
         "-spec add(integer(), integer()) -> {ok, integer()}.\n"
         "add(A, B) -> {ok, A + B}.\n"
     ),
-    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, []),
+    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
     Points = rebar3_mutate_ast:mutation_points(Forms, rebar3_mutate_operators:all()),
     Original = function_source(Forms),
     Inert = [
@@ -111,7 +111,7 @@ test_functions_are_not_mutated_test() ->
         "-endif.\n"
         "add(A, B) -> A + B.\n"
     ),
-    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, []),
+    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
     Points = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic, op_constant]),
     Lines = lists:usort([rebar3_mutate_ast:get_point_line(P) || P <- Points]),
     ?assertEqual([6], Lines),
@@ -119,7 +119,7 @@ test_functions_are_not_mutated_test() ->
 
 every_point_reports_a_real_line_test() ->
     File = write_module("attr_target", drift_source()),
-    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, []),
+    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
     Points = rebar3_mutate_ast:mutation_points(Forms, rebar3_mutate_operators:all()),
     ?assertEqual([], [P || P <- Points, rebar3_mutate_ast:get_point_line(P) =:= 0]),
     ?assertEqual([], [P || P <- Points, rebar3_mutate_ast:get_point_file(P) =:= ""]),
@@ -171,3 +171,46 @@ write_temp_module_with_eqwalizer() ->
         "add(A, B) -> A + B.\n",
     ok = file:write_file(File, Content),
     File.
+
+%% A function behind -ifdef used to resolve to the branch the project does not
+%% build, so the plugin mutated code that never ships and scored the module
+%% without saying so.
+respects_project_defines_test() ->
+    File = write_module(
+        "gated_target",
+        "-module(gated_target).\n"
+        "-export([f/1]).\n"
+        "-ifdef(FEATURE_X).\n"
+        "f(N) -> N * 2.\n"
+        "-else.\n"
+        "f(_) -> not_available.\n"
+        "-endif.\n"
+    ),
+    Without = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
+    {ok, _, PlainForms} = Without,
+    ?assertEqual([6], [Line || {function, Line, f, 1, _} <- PlainForms]),
+
+    With = rebar3_mutate_ast:parse_file(
+        File, rebar3_mutate_opts:epp([{d, 'FEATURE_X'}], [])
+    ),
+    {ok, _, GatedForms} = With,
+    ?assertEqual([4], [Line || {function, Line, f, 1, _} <- GatedForms]),
+    Points = rebar3_mutate_ast:mutation_points(GatedForms, rebar3_mutate_operators:all()),
+    ?assertEqual([4], lists:usort([rebar3_mutate_ast:get_point_line(P) || P <- Points])),
+    file:delete(File).
+
+%% epp answers {ok, Forms} for an unresolvable include, embedding an error form
+%% and dropping the functions around it. Scoring what is left is a wrong number.
+incomplete_parse_is_rejected_test() ->
+    File = write_module(
+        "broken_target",
+        "-module(broken_target).\n"
+        "-export([f/0]).\n"
+        "-include(\"no_such_file_anywhere.hrl\").\n"
+        "f() -> ok.\n"
+    ),
+    ?assertMatch(
+        {error, {incomplete_parse, _}},
+        rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], []))
+    ),
+    file:delete(File).
