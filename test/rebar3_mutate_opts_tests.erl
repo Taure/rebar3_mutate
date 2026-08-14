@@ -4,22 +4,22 @@
 
 epp_always_defines_test_test() ->
     Epp = rebar3_mutate_opts:epp([], []),
-    ?assertEqual([{'TEST', true}], proplists:get_value(macros, Epp)).
+    ?assertEqual([{'TEST', true}], option(macros, Epp)).
 
 epp_carries_project_defines_test() ->
     Epp = rebar3_mutate_opts:epp([debug_info, {d, 'FEATURE_X'}, {d, 'LIMIT', 42}], []),
-    Macros = proplists:get_value(macros, Epp),
+    Macros = option(macros, Epp),
     ?assert(lists:member({'FEATURE_X', true}, Macros)),
     ?assert(lists:member({'LIMIT', 42}, Macros)),
     ?assert(lists:member({'TEST', true}, Macros)).
 
 epp_merges_include_dirs_test() ->
     Epp = rebar3_mutate_opts:epp([{i, "extra/include"}], ["app/include"]),
-    ?assertEqual(["app/include", "extra/include"], proplists:get_value(includes, Epp)).
+    ?assertEqual(["app/include", "extra/include"], option(includes, Epp)).
 
 epp_enables_requested_features_test() ->
     Epp = rebar3_mutate_opts:epp([{feature, maybe_expr, enable}], []),
-    ?assertEqual([maybe_expr], proplists:get_value(features, Epp)),
+    ?assertEqual([maybe_expr], option(features, Epp)),
     ?assertEqual(undefined, proplists:get_value(features, rebar3_mutate_opts:epp([], []))).
 
 %% Defines and include paths are spent by the time epp hands over forms, so
@@ -53,12 +53,23 @@ compile_never_forwards_warnings_as_errors_test() ->
 %% made every module fail to parse with {redefine, 'TEST'}.
 epp_does_not_redefine_test_macro_test() ->
     Epp = rebar3_mutate_opts:epp([{d, 'TEST'}], []),
-    Macros = proplists:get_value(macros, Epp),
+    Macros = option(macros, Epp),
     ?assertEqual(1, length([K || {K, _} <- Macros, K =:= 'TEST'])).
 
 epp_deduplicates_repeated_defines_test() ->
     Epp = rebar3_mutate_opts:epp([{d, 'A', 1}, {d, 'B'}, {d, 'A', 2}], []),
-    Macros = proplists:get_value(macros, Epp),
+    Macros = option(macros, Epp),
     ?assertEqual(1, length([K || {K, _} <- Macros, K =:= 'A'])),
     ?assert(lists:member({'A', 1}, Macros)),
     ?assert(lists:member({'B', true}, Macros)).
+
+%%====================================================================
+%% Helpers
+%%====================================================================
+
+-spec option(atom(), [term()]) -> [term()].
+option(Key, Options) ->
+    case lists:keyfind(Key, 1, Options) of
+        {Key, Value} when is_list(Value) -> Value;
+        _ -> []
+    end.
