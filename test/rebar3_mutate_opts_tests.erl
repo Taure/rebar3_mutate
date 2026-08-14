@@ -47,3 +47,18 @@ compile_forwards_only_what_still_applies_test() ->
 compile_never_forwards_warnings_as_errors_test() ->
     Compile = rebar3_mutate_opts:compile([warnings_as_errors, debug_info]),
     ?assertNot(lists:member(warnings_as_errors, Compile)).
+
+%% rebar3 runs this provider in the test profile, whose erl_opts already define
+%% TEST. epp rejects a macro defined twice, so prepending it unconditionally
+%% made every module fail to parse with {redefine, 'TEST'}.
+epp_does_not_redefine_test_macro_test() ->
+    Epp = rebar3_mutate_opts:epp([{d, 'TEST'}], []),
+    Macros = proplists:get_value(macros, Epp),
+    ?assertEqual(1, length([K || {K, _} <- Macros, K =:= 'TEST'])).
+
+epp_deduplicates_repeated_defines_test() ->
+    Epp = rebar3_mutate_opts:epp([{d, 'A', 1}, {d, 'B'}, {d, 'A', 2}], []),
+    Macros = proplists:get_value(macros, Epp),
+    ?assertEqual(1, length([K || {K, _} <- Macros, K =:= 'A'])),
+    ?assert(lists:member({'A', 1}, Macros)),
+    ?assert(lists:member({'B', true}, Macros)).

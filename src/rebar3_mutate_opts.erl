@@ -11,7 +11,7 @@
 epp(ErlOpts, IncludeDirs) ->
     [
         {includes, IncludeDirs ++ includes(ErlOpts)},
-        {macros, [{'TEST', true} | macros(ErlOpts)]}
+        {macros, with_test(macros(ErlOpts))}
         | features(ErlOpts)
     ].
 
@@ -31,12 +31,24 @@ compile(ErlOpts) ->
 includes(ErlOpts) ->
     [Dir || {i, Dir} <- ErlOpts].
 
+%% epp rejects a macro defined twice with {redefine, Key}, and the test profile
+%% rebar3 runs this provider in already defines TEST, so the list has to be
+%% deduplicated rather than simply prepended to.
 macros(ErlOpts) ->
-    lists:append([macro(Opt) || Opt <- ErlOpts]).
+    unique(lists:append([macro(Opt) || Opt <- ErlOpts])).
 
 macro({d, Key}) -> [{Key, true}];
 macro({d, Key, Value}) -> [{Key, Value}];
 macro(_) -> [].
+
+with_test(Macros) ->
+    case lists:keymember('TEST', 1, Macros) of
+        true -> Macros;
+        false -> [{'TEST', true} | Macros]
+    end.
+
+unique([]) -> [];
+unique([{Key, _} = Macro | Rest]) -> [Macro | unique([M || {K, _} = M <- Rest, K =/= Key])].
 
 features(ErlOpts) ->
     case [Feature || {feature, Feature, enable} <- ErlOpts] of
