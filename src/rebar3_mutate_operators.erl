@@ -122,14 +122,10 @@ apply_operator(op_constant, Node) ->
     case erl_syntax:type(Node) of
         integer ->
             Val = erl_syntax:integer_value(Node),
-            Mutations =
-                [{op_constant, erl_syntax:copy_pos(Node, erl_syntax:integer(Val + 1))}] ++
-                    [{op_constant, erl_syntax:copy_pos(Node, erl_syntax:integer(Val - 1))}] ++
-                    case Val of
-                        0 -> [];
-                        _ -> [{op_constant, erl_syntax:copy_pos(Node, erl_syntax:integer(0))}]
-                    end,
-            Mutations;
+            [
+                {op_constant, erl_syntax:copy_pos(Node, erl_syntax:integer(Replacement))}
+             || Replacement <- lists:uniq([Val + 1, Val - 1, 0]) -- [Val]
+            ];
         _ ->
             []
     end;

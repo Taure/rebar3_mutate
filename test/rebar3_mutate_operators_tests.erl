@@ -258,3 +258,28 @@ make_infix(Left, Op, Right) ->
 
 get_op(InfixNode) ->
     erl_syntax:operator_name(erl_syntax:infix_expr_operator(InfixNode)).
+
+%% N-1 and the separate 0 replacement coincide for 1 and -1, so every such
+%% integer produced two identical mutants: the same code compiled and tested
+%% twice, counted twice, and listed twice in the surviving-mutant report.
+op_constant_does_not_duplicate_around_zero_test() ->
+    ?assertEqual([2, 0], constant_replacements(1)),
+    ?assertEqual([0, -2], constant_replacements(-1)).
+
+op_constant_never_replaces_a_value_with_itself_test() ->
+    ?assertEqual([1, -1], constant_replacements(0)),
+    lists:foreach(
+        fun(Val) -> ?assertNot(lists:member(Val, constant_replacements(Val))) end,
+        [-3, -1, 0, 1, 2, 5, 100]
+    ).
+
+op_constant_keeps_all_three_replacements_when_distinct_test() ->
+    ?assertEqual([6, 4, 0], constant_replacements(5)),
+    ?assertEqual([-4, -6, 0], constant_replacements(-5)).
+
+constant_replacements(Val) ->
+    Node = erl_syntax:integer(Val),
+    [
+        erl_syntax:integer_value(Mutated)
+     || {op_constant, Mutated} <- rebar3_mutate_operators:mutate_node(Node, [op_constant])
+    ].
