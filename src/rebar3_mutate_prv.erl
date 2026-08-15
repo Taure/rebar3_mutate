@@ -138,6 +138,19 @@ process_file(File, #{epp := EppOpts} = AppOpts, Opts) ->
     end.
 
 process_module(Module, Forms, File, AppOpts, Opts) ->
+    case rebar3_mutate:own_module(Module) of
+        true ->
+            rebar_api:warn(
+                "~s: skipped. It belongs to the running plugin, and replacing it "
+                "would swap out code this run is executing.",
+                [Module]
+            ),
+            {skipped, Module, self_mutation};
+        false ->
+            process_target(Module, Forms, File, AppOpts, Opts)
+    end.
+
+process_target(Module, Forms, File, AppOpts, Opts) ->
     case resolve_test_spec(Module, Opts) of
         {error, Reason} ->
             rebar_api:warn("~s: skipped (~p)", [Module, Reason]),

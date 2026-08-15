@@ -161,6 +161,12 @@ The **mutation score** is `killed / (killed + survived + timed out)`. Compile er
 
 ## Known Limitations
 
+The plugin cannot mutate itself. It swaps modules in the one code server it
+shares with the code under test, so a mutant of one of its own modules would
+replace code the run is executing; restoring the original then has to purge a
+version a live process is using, which kills that process. Its own modules are
+reported as skipped with the reason `self_mutation`.
+
 If your EUnit tests live outside the `<module>_tests.erl` convention (for example one central `myapp_tests.erl` for the whole app), the plugin cannot associate them with the module under test. Such modules are reported as skipped rather than scored, so the number stays honest, but they are not covered. Tracked in [#13](https://github.com/Taure/rebar3_mutate/issues/13); coverage-guided test selection is the fix. Colocated `<module>_tests.erl` files and Common Test suites are unaffected.
 
 ## License
