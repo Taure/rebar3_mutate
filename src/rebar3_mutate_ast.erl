@@ -24,14 +24,19 @@
 -type mutation_point() :: #mutation_point{}.
 -export_type([mutation_point/0]).
 
--spec parse_file(file:filename(), [file:filename()]) ->
+%% EppOpts comes from rebar3_mutate_opts:epp/2 so the module is parsed the way
+%% the project builds it. epp answers {ok, Forms} even when it could not resolve
+%% an include or a macro, embedding {error, _} forms and dropping the functions
+%% around them, so a parse that lost anything is rejected rather than scored.
+-spec parse_file(file:filename(), [term()]) ->
     {ok, atom(), [erl_parse:abstract_form()]} | {error, term()}.
-parse_file(File, IncludeDirs) ->
-    Opts = [{includes, IncludeDirs}, {macros, [{'TEST', true}]}],
-    case epp:parse_file(File, Opts) of
+parse_file(File, EppOpts) ->
+    case epp:parse_file(File, EppOpts) of
         {ok, Forms} ->
-            Module = extract_module(Forms),
-            {ok, Module, Forms};
+            case [Reason || {error, Reason} <- Forms] of
+                [] -> {ok, extract_module(Forms), Forms};
+                Errors -> {error, {incomplete_parse, Errors}}
+            end;
         {error, _} = Err ->
             Err
     end.

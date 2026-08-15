@@ -80,7 +80,7 @@ options(State) ->
 run(State, Opts) ->
     Targets = collect_targets(rebar_state:project_apps(State), Opts),
     ok = check_targets(Targets, Opts),
-    Outcomes = [process_file(File, IncludeDirs, Opts) || {File, IncludeDirs} <- Targets],
+    Outcomes = [process_file(File, AppOpts, Opts) || {File, AppOpts} <- Targets],
     Scored = [{Module, Results} || {ok, Module, Results} <- Outcomes],
     Skipped = [{Module, Reason} || {skipped, Module, Reason} <- Outcomes],
     Failed = [{Module, Reason} || {baseline_failed, Module, Reason} <- Outcomes],
@@ -93,11 +93,27 @@ collect_targets(Apps, #{modules := Modules, exclude := Exclude, diff := DiffFilt
             AppDir = rebar_app_info:dir(AppInfo),
             SrcDir = filename:join(AppDir, "src"),
             IncludeDirs = [filename:join(AppDir, "include"), AppDir],
+            ErlOpts = erl_opts(AppInfo),
+            AppOpts = #{
+                epp => rebar3_mutate_opts:epp(ErlOpts, IncludeDirs),
+                compile => rebar3_mutate_opts:compile(ErlOpts)
+            },
             Files = find_source_files(SrcDir, Modules, Exclude),
-            [{File, IncludeDirs} || File <- filter_files_by_diff(Files, DiffFilter)]
+            [{File, AppOpts} || File <- filter_files_by_diff(Files, DiffFilter)]
         end
      || AppInfo <- Apps
     ]).
+
+%% rebar_opts:erl_opts/1 is what rebar3's own compiler reads, so platform_define
+%% and profile-merged options are already resolved here.
+erl_opts(AppInfo) ->
+    try
+        rebar_opts:erl_opts(rebar_app_info:opts(AppInfo))
+    catch
+        _:_ ->
+            rebar_api:warn("Could not read erl_opts; parsing with defaults", []),
+            []
+    end.
 
 %% An explicit -m that matches nothing used to run zero mutants, which the
 %% --min-score gate then treated as a pass.
@@ -112,25 +128,25 @@ check_targets([], #{modules := Modules}) when Modules =/= all ->
 check_targets(_Targets, _Opts) ->
     ok.
 
-process_file(File, IncludeDirs, Opts) ->
-    case rebar3_mutate_ast:parse_file(File, IncludeDirs) of
+process_file(File, #{epp := EppOpts} = AppOpts, Opts) ->
+    case rebar3_mutate_ast:parse_file(File, EppOpts) of
         {ok, Module, Forms} ->
-            process_module(Module, Forms, File, Opts);
+            process_module(Module, Forms, File, AppOpts, Opts);
         {error, Reason} ->
             rebar_api:warn("Skipping ~s: ~p", [File, Reason]),
-            {skipped, list_to_atom(filename:basename(File, ".erl")), {parse_failed, Reason}}
+            {skipped, module_of(File), {parse_failed, Reason}}
     end.
 
-process_module(Module, Forms, File, Opts) ->
+process_module(Module, Forms, File, AppOpts, Opts) ->
     case resolve_test_spec(Module, Opts) of
         {error, Reason} ->
             rebar_api:warn("~s: skipped (~p)", [Module, Reason]),
             {skipped, Module, Reason};
         {ok, TestSpec} ->
-            baseline_then_mutate(Module, Forms, File, TestSpec, Opts)
+            baseline_then_mutate(Module, Forms, File, TestSpec, AppOpts, Opts)
     end.
 
-baseline_then_mutate(Module, Forms, File, TestSpec, #{timeout := Timeout} = Opts) ->
+baseline_then_mutate(Module, Forms, File, TestSpec, AppOpts, #{timeout := Timeout} = Opts) ->
     BaselineTimeout = max(Timeout * 4, ?BASELINE_TIMEOUT_FLOOR),
     case rebar3_mutate_runner:run_baseline(Module, TestSpec, BaselineTimeout) of
         no_tests ->
@@ -140,16 +156,16 @@ baseline_then_mutate(Module, Forms, File, TestSpec, #{timeout := Timeout} = Opts
             rebar_api:error("~s: tests do not pass unmutated (~p)", [Module, Reason]),
             {baseline_failed, Module, Reason};
         {ok, BaselineMs} ->
-            mutate_module(Module, Forms, File, TestSpec, BaselineMs, Opts)
+            mutate_module(Module, Forms, File, TestSpec, BaselineMs, AppOpts, Opts)
     end.
 
-mutate_module(Module, Forms, File, TestSpec, BaselineMs, Opts) ->
+mutate_module(Module, Forms, File, TestSpec, BaselineMs, AppOpts, Opts) ->
     #{operators := Operators, workers := Workers, diff := DiffFilter} = Opts,
     AllPoints = rebar3_mutate_ast:mutation_points(Forms, Operators),
     Points = filter_by_diff(AllPoints, File, DiffFilter),
     log_points(Module, length(AllPoints), length(Points)),
     Timeout = mutant_timeout(Module, maps:get(timeout, Opts), BaselineMs),
-    Results = run_points(Points, Forms, Module, TestSpec, Timeout, Workers),
+    Results = run_points(Points, Forms, Module, TestSpec, Timeout, Workers, AppOpts),
     {ok, Module, Results}.
 
 %% A per-mutant timeout below the suite's own runtime turns every mutant into a
@@ -172,11 +188,11 @@ log_points(Module, Total, Filtered) ->
 %% Mutants are compiled in parallel because that is pure computation, then
 %% loaded and tested one at a time because the code server only holds two
 %% versions of a module.
-run_points(Points, Forms, Module, TestSpec, Timeout, Workers) ->
+run_points(Points, Forms, Module, TestSpec, Timeout, Workers, #{compile := CompileOpts}) ->
     Compiled = rebar3_mutate_pool:pmap(
         fun(Point) ->
             MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, Point),
-            rebar3_mutate_runner:compile_mutant(Module, MutatedForms)
+            rebar3_mutate_runner:compile_mutant(Module, MutatedForms, CompileOpts)
         end,
         Points,
         Workers

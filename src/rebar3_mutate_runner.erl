@@ -1,6 +1,14 @@
 -module(rebar3_mutate_runner).
 
--export([compile_mutant/2, run_mutant/4, load_and_test/4, run_baseline/3, has_tests/2]).
+-export([
+    compile_mutant/2,
+    compile_mutant/3,
+    run_mutant/4,
+    run_mutant/5,
+    load_and_test/4,
+    run_baseline/3,
+    has_tests/2
+]).
 
 -type test_spec() :: eunit | {ct, atom()}.
 -type verdict() :: killed | survived | timed_out | {compile_error, term()} | {skipped, term()}.
@@ -10,7 +18,12 @@
 -spec compile_mutant(atom(), [erl_parse:abstract_form()]) ->
     {ok, binary()} | {compile_error, term()}.
 compile_mutant(Module, MutatedForms) ->
-    case compile:forms(MutatedForms, [binary, return_errors]) of
+    compile_mutant(Module, MutatedForms, [binary, return_errors]).
+
+-spec compile_mutant(atom(), [erl_parse:abstract_form()], [term()]) ->
+    {ok, binary()} | {compile_error, term()}.
+compile_mutant(Module, MutatedForms, CompileOpts) ->
+    case compile:forms(MutatedForms, CompileOpts) of
         {ok, Module, Binary} ->
             {ok, Binary};
         {ok, Module, Binary, _Warnings} ->
@@ -21,7 +34,12 @@ compile_mutant(Module, MutatedForms) ->
 
 -spec run_mutant(atom(), [erl_parse:abstract_form()], test_spec(), pos_integer()) -> verdict().
 run_mutant(Module, MutatedForms, TestSpec, Timeout) ->
-    case compile_mutant(Module, MutatedForms) of
+    run_mutant(Module, MutatedForms, TestSpec, Timeout, [binary, return_errors]).
+
+-spec run_mutant(atom(), [erl_parse:abstract_form()], test_spec(), pos_integer(), [term()]) ->
+    verdict().
+run_mutant(Module, MutatedForms, TestSpec, Timeout, CompileOpts) ->
+    case compile_mutant(Module, MutatedForms, CompileOpts) of
         {ok, Binary} ->
             load_and_test(Module, Binary, TestSpec, Timeout);
         {compile_error, _} = Err ->

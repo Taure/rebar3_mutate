@@ -175,7 +175,7 @@ build(Module, Body) ->
     {ok, Module} = compile:file(File, [{outdir, Dir}, debug_info, {d, 'TEST'}]),
     code:purge(Module),
     {module, Module} = code:load_file(Module),
-    {ok, Module, Forms} = rebar3_mutate_ast:parse_file(File, []),
+    {ok, Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
     {Module, Forms, File}.
 
 cleanup(Module, File) ->
