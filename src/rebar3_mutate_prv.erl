@@ -2,7 +2,7 @@
 
 -behaviour(provider).
 
--export([init/1, do/1, format_error/1]).
+-export([init/1, do/1, format_error/1, gate_decision/3]).
 
 -define(PROVIDER, mutate).
 -define(DEPS, [{default, app_discovery}, {default, compile}]).
@@ -267,25 +267,48 @@ gate(_State, _Scored, [{Module, Reason} | _], _Opts) ->
                 "~s: tests do not pass unmutated (~p); mutation results are meaningless",
                 [Module, Reason]
             )}};
-gate(State, _Scored, [], #{min_score := undefined}) ->
-    {ok, State};
-gate(State, Scored, [], #{min_score := Threshold}) ->
+gate(State, Scored, [], #{min_score := Threshold, diff := DiffFilter}) ->
     Counts = rebar3_mutate_report:total_count(Scored),
-    case rebar3_mutate_report:testable(Counts) of
-        0 ->
+    case gate_decision(Counts, Threshold, DiffFilter) of
+        pass ->
             {ok, State};
+        {pass, Message} ->
+            rebar_api:info("~s", [Message]),
+            {ok, State};
+        {fail, Message} ->
+            {error, {?MODULE, Message}}
+    end.
+
+%% An empty diff genuinely means the change touched no mutable line, so there is
+%% nothing to gate. Outside diff mode, nothing to measure means the gate never
+%% ran: every module skipped for want of tests would otherwise satisfy any
+%% threshold and report success.
+-spec gate_decision(rebar3_mutate_report:counts(), float() | undefined, term()) ->
+    pass | {pass, iodata()} | {fail, iodata()}.
+gate_decision(_Counts, undefined, _DiffFilter) ->
+    pass;
+gate_decision(Counts, Threshold, DiffFilter) ->
+    case {rebar3_mutate_report:testable(Counts), DiffFilter} of
+        {0, none} ->
+            {fail,
+                io_lib:format(
+                    "--min-score ~.1f% was requested but no mutant could be tested. "
+                    "Nothing was measured, so this is a failure rather than a pass.",
+                    [Threshold]
+                )};
+        {0, _Diff} ->
+            {pass, "No mutable lines in the diff; --min-score not applied"};
         _ ->
             Score = rebar3_mutate_report:score(Counts),
             case Score >= Threshold of
                 true ->
-                    {ok, State};
+                    pass;
                 false ->
-                    {error,
-                        {?MODULE,
-                            io_lib:format(
-                                "Mutation score ~.1f% is below minimum ~.1f%",
-                                [Score, Threshold]
-                            )}}
+                    {fail,
+                        io_lib:format(
+                            "Mutation score ~.1f% is below minimum ~.1f%",
+                            [Score, Threshold]
+                        )}
             end
     end.
 
