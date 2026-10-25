@@ -135,6 +135,7 @@ Before mutating a module, the plugin runs its tests unmutated:
 
 - **green** -- proceed, and use the measured suite time to sanity-check `--timeout`
 - **red** -- fail the run; a mutation score computed against a failing suite is meaningless, because every mutant reads as killed
+- **not repeatable** -- the suite must pass twice before mutating and once more after the last mutant; if either run fails, the module fails the run like a red baseline. A suite that leaves state behind (a database row, a registered name, a started application) would otherwise fail every run after the first and make every mutant, even an unchanged one, read as killed. Every module's suite therefore runs N + 3 times for N mutants, mapped or not. A module with no mutation points (for example none in the `--diff` range) is not run at all
 - **no tests** -- skip the module and report it as skipped rather than scoring it 0%
 
 ## Progress Indicator

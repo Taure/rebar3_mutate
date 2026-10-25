@@ -2,7 +2,16 @@
 
 -behaviour(provider).
 
--export([init/1, do/1, format_error/1, gate_decision/3, resolve_test_spec/2, mapping_ignored/1]).
+-export([
+    init/1,
+    do/1,
+    format_error/1,
+    gate_decision/3,
+    resolve_test_spec/2,
+    mapping_ignored/1,
+    baseline_then_mutate/6,
+    baseline_timeout/1
+]).
 
 -define(PROVIDER, mutate).
 -define(DEPS, [{default, app_discovery}, {default, compile}]).
@@ -190,27 +199,91 @@ log_test_spec(Module, {eunit, Extra}) ->
 log_test_spec(_Module, _TestSpec) ->
     ok.
 
-baseline_then_mutate(Module, Forms, File, TestSpec, AppOpts, #{timeout := Timeout} = Opts) ->
-    BaselineTimeout = max(Timeout * 4, ?BASELINE_TIMEOUT_FLOOR),
-    case rebar3_mutate_runner:run_baseline(Module, TestSpec, BaselineTimeout) of
-        no_tests ->
-            rebar_api:warn("~s: no tests found, skipped", [Module]),
-            {skipped, Module, no_tests};
-        {failed, Reason} ->
-            rebar_api:error("~s: tests do not pass unmutated (~p)", [Module, Reason]),
-            {baseline_failed, Module, Reason};
-        {ok, BaselineMs} ->
-            mutate_module(Module, Forms, File, TestSpec, BaselineMs, AppOpts, Opts)
+%% Any failing run counts as a kill, so a suite that leaves state behind (a
+%% row, a registered name, a started application) passes the first baseline
+%% and then kills every mutant, even one identical to the original. The
+%% baseline therefore has to pass twice before mutating and once more after
+%% the last mutant, or the module's results are thrown away. With no mutation
+%% points there is nothing to protect, so the suite is not run at all.
+-spec baseline_then_mutate(
+    module(),
+    [erl_parse:abstract_form()],
+    file:filename(),
+    rebar3_mutate_runner:test_spec(),
+    map(),
+    map()
+) ->
+    {ok, module(), rebar3_mutate_report:results()}
+    | {skipped, module(), no_tests}
+    | {baseline_failed, module(), term()}.
+baseline_then_mutate(Module, Forms, File, TestSpec, AppOpts, #{timeout := Timeout} = Opts) when
+    is_integer(Timeout)
+->
+    case mutation_points(Module, Forms, File, Opts) of
+        [] ->
+            {ok, Module, []};
+        Points ->
+            BaselineTimeout = baseline_timeout(Timeout),
+            case rebar3_mutate_runner:run_baseline(Module, TestSpec, BaselineTimeout) of
+                no_tests ->
+                    rebar_api:warn("~s: no tests found, skipped", [Module]),
+                    {skipped, Module, no_tests};
+                {failed, Reason} ->
+                    baseline_failed(Module, Reason);
+                {ok, _FirstMs} ->
+                    case rebar3_mutate_runner:run_baseline(Module, TestSpec, BaselineTimeout) of
+                        {ok, BaselineMs} ->
+                            MutantTimeout = mutant_timeout(Module, Timeout, BaselineMs),
+                            Results = run_points(
+                                Points, Forms, Module, TestSpec, MutantTimeout, AppOpts, Opts
+                            ),
+                            confirm_baseline(Module, TestSpec, BaselineTimeout, Results);
+                        NotOk ->
+                            baseline_failed(Module, {not_repeatable, baseline_reason(NotOk)})
+                    end
+            end
     end.
 
-mutate_module(Module, Forms, File, TestSpec, BaselineMs, AppOpts, Opts) ->
-    #{operators := Operators, workers := Workers, diff := DiffFilter} = Opts,
+-spec baseline_timeout(pos_integer()) -> pos_integer().
+baseline_timeout(Timeout) when Timeout * 4 > ?BASELINE_TIMEOUT_FLOOR ->
+    Timeout * 4;
+baseline_timeout(_Timeout) ->
+    ?BASELINE_TIMEOUT_FLOOR.
+
+confirm_baseline(Module, TestSpec, Timeout, Results) ->
+    case rebar3_mutate_runner:run_baseline(Module, TestSpec, Timeout) of
+        {ok, _Ms} ->
+            {ok, Module, Results};
+        NotOk ->
+            baseline_failed(Module, {not_repeatable_after_mutants, baseline_reason(NotOk)})
+    end.
+
+baseline_reason({failed, Reason}) -> Reason;
+baseline_reason(no_tests) -> no_tests.
+
+baseline_failed(Module, {not_repeatable, _} = Reason) ->
+    rebar_api:error(
+        "~s: tests passed unmutated once but failed when run again (~p). The suite "
+        "leaves state behind, so every mutant would read as killed.",
+        [Module, Reason]
+    ),
+    {baseline_failed, Module, Reason};
+baseline_failed(Module, {not_repeatable_after_mutants, _} = Reason) ->
+    rebar_api:error(
+        "~s: tests no longer pass unmutated after the mutants ran (~p). The suite "
+        "or a mutant left state behind, so the kills cannot be trusted.",
+        [Module, Reason]
+    ),
+    {baseline_failed, Module, Reason};
+baseline_failed(Module, Reason) ->
+    rebar_api:error("~s: tests do not pass unmutated (~p)", [Module, Reason]),
+    {baseline_failed, Module, Reason}.
+
+mutation_points(Module, Forms, File, #{operators := Operators, diff := DiffFilter}) ->
     AllPoints = rebar3_mutate_ast:mutation_points(Forms, Operators),
     Points = filter_by_diff(AllPoints, File, DiffFilter),
     log_points(Module, length(AllPoints), length(Points)),
-    Timeout = mutant_timeout(Module, maps:get(timeout, Opts), BaselineMs),
-    Results = run_points(Points, Forms, Module, TestSpec, Timeout, Workers, AppOpts),
-    {ok, Module, Results}.
+    Points.
 
 %% A per-mutant timeout below the suite's own runtime turns every mutant into a
 %% timeout, so the whole run reports nothing usable.
@@ -232,7 +305,9 @@ log_points(Module, Total, Filtered) ->
 %% Mutants are compiled in parallel because that is pure computation, then
 %% loaded and tested one at a time because the code server only holds two
 %% versions of a module.
-run_points(Points, Forms, Module, TestSpec, Timeout, Workers, #{compile := CompileOpts}) ->
+run_points(Points, Forms, Module, TestSpec, Timeout, #{compile := CompileOpts}, #{
+    workers := Workers
+}) ->
     Compiled = rebar3_mutate_pool:pmap(
         fun(Point) ->
             MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, Point),
@@ -295,7 +370,7 @@ gate(_State, _Scored, [{Module, Reason} | _], _Opts) ->
     {error,
         {?MODULE,
             io_lib:format(
-                "~s: tests do not pass unmutated (~p); mutation results are meaningless",
+                "~s: baseline failed (~p); mutation results are meaningless",
                 [Module, Reason]
             )}};
 gate(State, Scored, [], #{min_score := Threshold, diff := DiffFilter}) ->

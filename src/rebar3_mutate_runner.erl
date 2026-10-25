@@ -235,15 +235,22 @@ load_mutant(Module, Binary) ->
 restore_module(Module, {object_code, Binary, Filename}) ->
     purge(Module),
     case code:load_binary(Module, Filename, Binary) of
-        {module, Module} -> ok;
+        {module, Module} -> purge_mutant(Module);
         {error, Reason} -> erlang:error({mutant_restore_failed, Module, Reason})
     end;
 restore_module(Module, {beam_path, _Path}) ->
     purge(Module),
     case code:load_file(Module) of
-        {module, Module} -> ok;
+        {module, Module} -> purge_mutant(Module);
         {error, Reason} -> erlang:error({mutant_restore_failed, Module, Reason})
     end.
+
+%% A timed-out mutant's eunit test process belongs to eunit_server, not to the
+%% worker that was killed, so it can still be running mutant code. Purging the
+%% mutant, now the old version, kills it before the next run starts.
+purge_mutant(Module) ->
+    _ = code:purge(Module),
+    ok.
 
 purge(Module) ->
     case code:soft_purge(Module) of
