@@ -19,7 +19,9 @@ score_below_the_threshold_fails_test() ->
 nothing_measured_fails_the_gate_test() ->
     ?assertMatch({fail, _}, rebar3_mutate_prv:gate_decision(counts(0, 0), 90.0, none)),
     {fail, Message} = rebar3_mutate_prv:gate_decision(counts(0, 0), 90.0, none),
-    ?assertNotEqual(nomatch, string:find(lists:flatten(Message), "no mutant could be tested")).
+    ?assertNotEqual(
+        nomatch, binary:match(iolist_to_binary(Message), ~"no mutant could be tested")
+    ).
 
 %% An empty diff is different: the change genuinely touched no mutable line, so
 %% there is nothing to gate and passing is correct.

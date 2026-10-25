@@ -46,7 +46,9 @@ original_is_restored_after_a_mutant_runs_test() ->
     MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
     _ = rebar3_mutate_runner:run_mutant(Module, MutatedForms, eunit, 5000),
     ?assertEqual(5, Module:add(2, 3)),
-    ?assertEqual(".beam", filename:extension(code:which(Module))),
+    Path = code:which(Module),
+    true = is_list(Path),
+    ?assertEqual(".beam", filename:extension(Path)),
     cleanup(Module, File).
 
 original_is_restored_when_the_test_run_raises_test() ->
