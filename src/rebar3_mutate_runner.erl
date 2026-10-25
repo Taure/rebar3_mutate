@@ -7,10 +7,11 @@
     run_mutant/5,
     load_and_test/4,
     run_baseline/3,
-    has_tests/2
+    has_tests/2,
+    contributes_tests/1
 ]).
 
--type test_spec() :: eunit | {ct, atom()}.
+-type test_spec() :: eunit | {eunit, [module()]} | {ct, atom()}.
 -type verdict() :: killed | survived | timed_out | {compile_error, term()} | {skipped, term()}.
 
 -export_type([test_spec/0, verdict/0]).
@@ -92,33 +93,64 @@ run_baseline(Module, TestSpec, Timeout) ->
 %% baseline does not by itself mean anything ran.
 -spec has_tests(atom(), test_spec()) -> boolean().
 has_tests(Module, eunit) ->
-    Tests = atom_to_list(Module) ++ "_tests.beam",
-    case code:where_is_file(Tests) of
+    case code:where_is_file(tests_name(Module) ++ ".beam") of
         non_existing -> exports_test_function(Module);
         _Path -> true
     end;
+has_tests(Module, {eunit, Extra}) ->
+    has_tests(Module, eunit) orelse any_contributes_tests(Extra);
 has_tests(_Module, {ct, Suite}) ->
     case code:ensure_loaded(Suite) of
         {module, Suite} -> true;
         {error, _} -> false
     end.
 
+%% Whether eunit:test(Module) would run anything: Module or <Module>_tests
+%% exports a test function. Read from the beam on disk, so nothing is loaded.
+-spec contributes_tests(module()) -> boolean().
+contributes_tests(Module) ->
+    exports_tests_on_disk(atom_to_list(Module)) orelse exports_tests_on_disk(tests_name(Module)).
+
+-spec any_contributes_tests([module()]) -> boolean().
+any_contributes_tests([]) -> false;
+any_contributes_tests([Test | Rest]) -> contributes_tests(Test) orelse any_contributes_tests(Rest).
+
+exports_tests_on_disk(Name) ->
+    case code:where_is_file(Name ++ ".beam") of
+        non_existing ->
+            false;
+        Path ->
+            case beam_lib:chunks(Path, [exports]) of
+                {ok, {_, [{exports, Exports}]}} -> lists:any(fun is_test_export/1, Exports);
+                {error, beam_lib, _} -> false
+            end
+    end.
+
+is_test_export({Name, 0}) -> is_test_name(atom_to_list(Name));
+is_test_export({_Name, _Arity}) -> false.
+
+tests_name(Module) ->
+    atom_to_list(Module) ++ "_tests".
+
+%% eunit:test/2 already runs <Module>_tests for Module, so listing it again
+%% would run that suite twice per mutant.
+-spec eunit_targets(module(), [module()]) -> [module()].
+eunit_targets(Module, Extra) ->
+    Implied = [atom_to_list(Module), tests_name(Module)],
+    [Module | [M || M <- unique(Extra), not lists:member(atom_to_list(M), Implied)]].
+
+-spec unique([module()]) -> [module()].
+unique([]) -> [];
+unique([Module | Rest]) -> [Module | unique([M || M <- Rest, M =/= Module])].
+
 %%====================================================================
 %% Test execution
 %%====================================================================
 
 execute(eunit, Module, Timeout) ->
-    in_worker(
-        fun() ->
-            try eunit:test(Module, [no_tty]) of
-                ok -> pass;
-                error -> fail
-            catch
-                _:_ -> fail
-            end
-        end,
-        Timeout
-    );
+    run_eunit(Module, Timeout);
+execute({eunit, Extra}, Module, Timeout) ->
+    run_eunit(eunit_targets(Module, Extra), Timeout);
 execute({ct, Suite}, _Module, Timeout) ->
     in_worker(
         fun() ->
@@ -134,6 +166,19 @@ execute({ct, Suite}, _Module, Timeout) ->
     );
 execute(Other, _Module, _Timeout) ->
     {error, {unknown_test_framework, Other}}.
+
+run_eunit(Tests, Timeout) ->
+    in_worker(
+        fun() ->
+            try eunit:test(Tests, [no_tty]) of
+                ok -> pass;
+                error -> fail
+            catch
+                _:_ -> fail
+            end
+        end,
+        Timeout
+    ).
 
 %% The worker sends before it exits, and signals between two processes keep
 %% their order, so the result is always ahead of the DOWN in the mailbox.
@@ -190,15 +235,22 @@ load_mutant(Module, Binary) ->
 restore_module(Module, {object_code, Binary, Filename}) ->
     purge(Module),
     case code:load_binary(Module, Filename, Binary) of
-        {module, Module} -> ok;
+        {module, Module} -> purge_mutant(Module);
         {error, Reason} -> erlang:error({mutant_restore_failed, Module, Reason})
     end;
 restore_module(Module, {beam_path, _Path}) ->
     purge(Module),
     case code:load_file(Module) of
-        {module, Module} -> ok;
+        {module, Module} -> purge_mutant(Module);
         {error, Reason} -> erlang:error({mutant_restore_failed, Module, Reason})
     end.
+
+%% A timed-out mutant's eunit test process belongs to eunit_server, not to the
+%% worker that was killed, so it can still be running mutant code. Purging the
+%% mutant, now the old version, kills it before the next run starts.
+purge_mutant(Module) ->
+    _ = code:purge(Module),
+    ok.
 
 purge(Module) ->
     case code:soft_purge(Module) of
@@ -212,13 +264,7 @@ purge(Module) ->
 exports_test_function(Module) ->
     case code:ensure_loaded(Module) of
         {module, Module} ->
-            lists:any(
-                fun
-                    ({Name, 0}) -> is_test_name(atom_to_list(Name));
-                    ({_, _}) -> false
-                end,
-                Module:module_info(exports)
-            );
+            lists:any(fun is_test_export/1, Module:module_info(exports));
         {error, _} ->
             false
     end.

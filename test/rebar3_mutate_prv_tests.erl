@@ -40,6 +40,139 @@ only_untestable_mutants_fails_the_gate_test() ->
     ?assertEqual(0, rebar3_mutate_report:testable(Counts)),
     ?assertMatch({fail, _}, rebar3_mutate_prv:gate_decision(Counts, 80.0, none)).
 
+%%====================================================================
+%% Config
+%%====================================================================
+
+invalid_config_stops_the_run_test() ->
+    State0 = rebar_state:set(rebar_state:new(), mutate, [{eunit_test, #{}}]),
+    State = rebar_state:command_parsed_args(State0, {[], []}),
+    ?assertMatch(
+        {error, {rebar3_mutate_prv, "Unknown mutate option eunit_test" ++ _}},
+        rebar3_mutate_prv:do(State)
+    ).
+
+eunit_mapping_is_reported_as_ignored_under_ct_test() ->
+    Mapping = #{my_module => [integration_tests]},
+    ?assert(rebar3_mutate_prv:mapping_ignored(#{framework => ct, eunit_tests => Mapping})),
+    ?assertNot(rebar3_mutate_prv:mapping_ignored(#{framework => ct, eunit_tests => #{}})),
+    ?assertNot(rebar3_mutate_prv:mapping_ignored(#{framework => eunit, eunit_tests => Mapping})).
+
+%%====================================================================
+%% Test spec resolution
+%%====================================================================
+
+unmapped_module_keeps_plain_eunit_test() ->
+    Opts = #{framework => eunit, eunit_tests => #{other_module => [other_module_checks]}},
+    ?assertEqual({ok, eunit}, rebar3_mutate_prv:resolve_test_spec(my_module, Opts)).
+
+mapped_module_gets_its_extra_test_modules_test() ->
+    Opts = #{framework => eunit, eunit_tests => #{my_module => [integration_tests, sandbox_tests]}},
+    ?assertEqual(
+        {ok, {eunit, [integration_tests, sandbox_tests]}},
+        rebar3_mutate_prv:resolve_test_spec(my_module, Opts)
+    ).
+
+eunit_mapping_does_not_apply_to_ct_test() ->
+    Opts = #{
+        framework => ct,
+        suite => "my_SUITE",
+        eunit_tests => #{my_module => [integration_tests]}
+    },
+    ?assertEqual({ok, {ct, my_SUITE}}, rebar3_mutate_prv:resolve_test_spec(my_module, Opts)).
+
+%%====================================================================
+%% Baseline repeatability
+%%====================================================================
+
+baseline_timeout_has_a_floor_test() ->
+    ?assertEqual(30000, rebar3_mutate_prv:baseline_timeout(5000)),
+    ?assertEqual(30000, rebar3_mutate_prv:baseline_timeout(7500)),
+    ?assertEqual(40000, rebar3_mutate_prv:baseline_timeout(10000)).
+
+baseline_repeatability_test_() ->
+    {foreach, fun setup/0, fun teardown/1, [
+        fun stateful_suite_fails_the_baseline_instead_of_killing/1,
+        fun suite_broken_by_the_mutants_fails_the_baseline/1,
+        fun repeatable_suite_is_scored/1,
+        fun no_mutation_points_runs_no_baseline/1,
+        fun timed_out_last_mutant_keeps_the_module_scored/1
+    ]}.
+
+%% Any failing run counts as a kill. A suite that leaves state behind passes
+%% the first baseline and then fails every later run, so a mutant identical to
+%% the original reads as killed; the second baseline has to catch it first.
+stateful_suite_fails_the_baseline_instead_of_killing(Dir) ->
+    fun() ->
+        {Module, Forms, File} = build(Dir, mutate_prv_stateful, target_source()),
+        {Checks, _, _} = build(Dir, mutate_prv_stateful_checks, stateful_source(Module)),
+        Spec = {eunit, [Checks]},
+        ?assertMatch({ok, _Ms}, rebar3_mutate_runner:run_baseline(Module, Spec, 5000)),
+        {ok, Identical} = rebar3_mutate_runner:compile_mutant(Module, Forms),
+        ?assertEqual(killed, rebar3_mutate_runner:load_and_test(Module, Identical, Spec, 5000)),
+        persistent_term:erase(mutate_prv_marker),
+        ?assertMatch(
+            {baseline_failed, Module, {not_repeatable, tests_failing}},
+            rebar3_mutate_prv:baseline_then_mutate(Module, Forms, File, Spec, app_opts(), opts())
+        )
+    end.
+
+suite_broken_by_the_mutants_fails_the_baseline(Dir) ->
+    fun() ->
+        {Module, Forms, File} = build(Dir, mutate_prv_decaying, target_source()),
+        {Checks, _, _} = build(Dir, mutate_prv_decaying_checks, counting_source(Module, 2)),
+        ?assertMatch(
+            {baseline_failed, Module, {not_repeatable_after_mutants, tests_failing}},
+            rebar3_mutate_prv:baseline_then_mutate(
+                Module, Forms, File, {eunit, [Checks]}, app_opts(), opts()
+            )
+        )
+    end.
+
+repeatable_suite_is_scored(Dir) ->
+    fun() ->
+        {Module, Forms, File} = build(Dir, mutate_prv_repeatable, target_source()),
+        {Checks, _, _} = build(Dir, mutate_prv_repeatable_checks, checks_source(Module)),
+        ?assertMatch(
+            {ok, Module, [{_Point, killed} | _]},
+            rebar3_mutate_prv:baseline_then_mutate(
+                Module, Forms, File, {eunit, [Checks]}, app_opts(), opts()
+            )
+        )
+    end.
+
+%% In diff mode most modules have no mutable line in the change; running their
+%% suites three times would measure nothing.
+no_mutation_points_runs_no_baseline(Dir) ->
+    fun() ->
+        {Module, Forms, File} = build(Dir, mutate_prv_pointless, target_source()),
+        {Checks, _, _} = build(Dir, mutate_prv_pointless_checks, counting_source(Module, 99)),
+        ?assertEqual(
+            {ok, Module, []},
+            rebar3_mutate_prv:baseline_then_mutate(
+                Module, Forms, File, {eunit, [Checks]}, app_opts(), (opts())#{
+                    operators => [op_list]
+                }
+            )
+        ),
+        ?assertEqual([{runs, 0}], ets:lookup(mutate_prv_runs, runs))
+    end.
+
+%% A timed-out mutant's eunit test process outlives the killed worker. Left
+%% running, it still holds the name the suite registers, and the check after
+%% the last mutant fails a suite that is in fact repeatable.
+timed_out_last_mutant_keeps_the_module_scored(Dir) ->
+    {timeout, 60, fun() ->
+        {Module, Forms, File} = build(Dir, mutate_prv_looping, looping_source()),
+        {Checks, _, _} = build(Dir, mutate_prv_looping_checks, registering_source(Module)),
+        ?assertMatch(
+            {ok, Module, [{_, timed_out}]},
+            rebar3_mutate_prv:baseline_then_mutate(
+                Module, Forms, File, {eunit, [Checks]}, app_opts(), (opts())#{timeout => 1000}
+            )
+        )
+    end}.
+
 counts(Killed, Survived) ->
     #{
         killed => Killed,
@@ -49,3 +182,92 @@ counts(Killed, Survived) ->
         skipped => 0,
         total => Killed + Survived
     }.
+
+opts() ->
+    #{timeout => 5000, operators => [op_arithmetic], workers => 1, diff => none}.
+
+app_opts() ->
+    #{compile => [binary, return_errors]}.
+
+target_source() ->
+    "-export([add/2]).\n"
+    "add(A, B) -> A + B.\n".
+
+checks_source(Target) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "add_test() -> ?assertEqual(5, " ++ atom_to_list(Target) ++
+        ":add(2, 3)).\n"
+        "-endif.\n".
+
+stateful_source(Target) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "add_test() ->\n"
+    "    ?assertEqual(undefined, persistent_term:get(mutate_prv_marker, undefined)),\n"
+    "    persistent_term:put(mutate_prv_marker, set),\n"
+    "    ?assertEqual(5, " ++ atom_to_list(Target) ++
+        ":add(2, 3)).\n"
+        "-endif.\n".
+
+counting_source(Target, PassingRuns) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "add_test() ->\n"
+    "    ?assert(ets:update_counter(mutate_prv_runs, runs, 1) =< " ++
+        integer_to_list(PassingRuns) ++
+        "),\n"
+        "    ?assertEqual(5, " ++ atom_to_list(Target) ++
+        ":add(2, 3)).\n"
+        "-endif.\n".
+
+looping_source() ->
+    "-export([count/1]).\n"
+    "count(0) -> ok;\n"
+    "count(N) when N > 0 -> count(N - 1).\n".
+
+registering_source(Target) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "count_test() ->\n"
+    "    register(mutate_prv_victim, self()),\n"
+    "    ok = " ++ atom_to_list(Target) ++
+        ":count(3),\n"
+        "    unregister(mutate_prv_victim).\n"
+        "-endif.\n".
+
+setup() ->
+    Dir = "/tmp/rebar3_mutate_prv_test_" ++ os:getpid(),
+    ok = filelib:ensure_dir(Dir ++ "/dummy"),
+    true = code:add_patha(Dir),
+    ets:new(mutate_prv_runs, [named_table, public]),
+    ets:insert(mutate_prv_runs, {runs, 0}),
+    Dir.
+
+teardown(Dir) ->
+    Modules = [
+        Module
+     || {Module, Path} <- code:all_loaded(), is_list(Path), lists:prefix(Dir, Path)
+    ],
+    [
+        begin
+            code:purge(Module),
+            code:delete(Module),
+            code:purge(Module)
+        end
+     || Module <- Modules
+    ],
+    code:del_path(Dir),
+    file:del_dir_r(Dir),
+    ets:delete(mutate_prv_runs),
+    persistent_term:erase(mutate_prv_marker),
+    ok.
+
+build(Dir, Module, Body) ->
+    File = Dir ++ "/" ++ atom_to_list(Module) ++ ".erl",
+    ok = file:write_file(File, "-module(" ++ atom_to_list(Module) ++ ").\n" ++ Body),
+    {ok, Module} = compile:file(File, [{outdir, Dir}, debug_info, {d, 'TEST'}]),
+    code:purge(Module),
+    {module, Module} = code:load_file(Module),
+    {ok, Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
+    {Module, Forms, File}.
