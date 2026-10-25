@@ -1,7 +1,5 @@
 -module(rebar3_mutate_prv).
 
--behaviour(provider).
-
 -export([
     init/1,
     do/1,
