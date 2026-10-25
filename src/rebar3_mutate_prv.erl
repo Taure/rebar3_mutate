@@ -1,7 +1,5 @@
 -module(rebar3_mutate_prv).
 
--behaviour(provider).
-
 -export([
     init/1,
     do/1,
@@ -207,7 +205,7 @@ log_test_spec(_Module, _TestSpec) ->
 %% points there is nothing to protect, so the suite is not run at all.
 -spec baseline_then_mutate(
     module(),
-    [erl_parse:abstract_form()],
+    rebar3_mutate_ast:forms(),
     file:filename(),
     rebar3_mutate_runner:test_spec(),
     map(),
@@ -523,8 +521,9 @@ find_source_files(SrcDir, Modules, ExcludeModules) ->
         _ -> [F || F <- Selected, not lists:member(module_of(F), ExcludeModules)]
     end.
 
+-spec module_of(file:filename()) -> module().
 module_of(File) ->
-    list_to_atom(filename:basename(File, ".erl")).
+    list_to_atom(filename:rootname(filename:basename(File), ".erl")).
 
 filter_files_by_diff(Files, none) ->
     Files;

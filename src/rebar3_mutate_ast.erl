@@ -22,20 +22,21 @@
 }).
 
 -type mutation_point() :: #mutation_point{}.
--export_type([mutation_point/0]).
+-type forms() :: [erl_parse:abstract_form() | {eof, erl_anno:location()}].
+-export_type([mutation_point/0, forms/0]).
 
 %% EppOpts comes from rebar3_mutate_opts:epp/2 so the module is parsed the way
 %% the project builds it. epp answers {ok, Forms} even when it could not resolve
 %% an include or a macro, embedding {error, _} forms and dropping the functions
 %% around them, so a parse that lost anything is rejected rather than scored.
--spec parse_file(file:filename(), [term()]) ->
-    {ok, atom(), [erl_parse:abstract_form()]} | {error, term()}.
+-spec parse_file(file:filename(), [rebar3_mutate_opts:epp_option()]) ->
+    {ok, atom(), forms()} | {error, term()}.
 parse_file(File, EppOpts) ->
     case epp:parse_file(File, EppOpts) of
-        {ok, Forms} ->
-            case [Reason || {error, Reason} <- Forms] of
-                [] -> {ok, extract_module(Forms), Forms};
-                Errors -> {error, {incomplete_parse, Errors}}
+        {ok, Parsed} ->
+            case split_errors(Parsed) of
+                {Forms, []} -> {ok, extract_module(Forms), Forms};
+                {_Forms, Errors} -> {error, {incomplete_parse, Errors}}
             end;
         {error, _} = Err ->
             Err
@@ -44,7 +45,7 @@ parse_file(File, EppOpts) ->
 %% Mutation points are identified by their child-index path from the root of
 %% the form list, so applying one is a splice rather than a second traversal
 %% that has to re-derive the same index.
--spec mutation_points([erl_parse:abstract_form()], [rebar3_mutate_operators:operator()]) ->
+-spec mutation_points(forms(), [rebar3_mutate_operators:operator()]) ->
     [mutation_point()].
 mutation_points(Forms, Operators) ->
     Source = source_file(Forms),
@@ -54,11 +55,10 @@ mutation_points(Forms, Operators) ->
      || {Index, Form} <- Mutable
     ]).
 
--spec apply_mutation([erl_parse:abstract_form()], mutation_point()) ->
-    [erl_parse:abstract_form()].
+-spec apply_mutation(forms(), mutation_point()) -> forms().
 apply_mutation(Forms, #mutation_point{path = Path, mutated = Mutated}) ->
     Tree = erl_syntax:form_list(tree_forms(Forms)),
-    erl_syntax:revert_forms(splice(Tree, Path, Mutated)).
+    revert_forms(splice(Tree, Path, Mutated)).
 
 -spec describe_mutation(mutation_point()) -> iolist().
 describe_mutation(#mutation_point{operator = Op, line = Line, original = Orig, mutated = Mut}) ->
@@ -138,6 +138,21 @@ is_test_function(_Name, _Arity) ->
 %%====================================================================
 %% Internal
 %%====================================================================
+
+-spec split_errors([erl_parse:abstract_form() | {eof, erl_anno:location()} | {error, term()}]) ->
+    {forms(), [term()]}.
+split_errors([{error, Reason} | Rest]) ->
+    {Forms, Errors} = split_errors(Rest),
+    {Forms, [Reason | Errors]};
+split_errors([Form | Rest]) ->
+    {Forms, Errors} = split_errors(Rest),
+    {[Form | Forms], Errors};
+split_errors([]) ->
+    {[], []}.
+
+-spec revert_forms(erl_syntax:syntaxTree()) -> dynamic().
+revert_forms(Tree) ->
+    erl_syntax:revert_forms(Tree).
 
 tree_forms(Forms) ->
     [F || F <- Forms, not is_eqwalizer(F)].

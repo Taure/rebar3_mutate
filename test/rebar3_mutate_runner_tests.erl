@@ -46,7 +46,9 @@ original_is_restored_after_a_mutant_runs_test() ->
     MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
     _ = rebar3_mutate_runner:run_mutant(Module, MutatedForms, eunit, 5000),
     ?assertEqual(5, Module:add(2, 3)),
-    ?assertEqual(".beam", filename:extension(code:which(Module))),
+    Path = code:which(Module),
+    true = is_list(Path),
+    ?assertEqual(".beam", filename:extension(Path)),
     cleanup(Module, File).
 
 original_is_restored_when_the_test_run_raises_test() ->
@@ -54,10 +56,14 @@ original_is_restored_when_the_test_run_raises_test() ->
     {ok, Binary} = rebar3_mutate_runner:compile_mutant(Module, Forms),
     ?assertMatch(
         {skipped, {unknown_test_framework, no_such_framework}},
-        rebar3_mutate_runner:load_and_test(Module, Binary, no_such_framework, 5000)
+        rebar3_mutate_runner:load_and_test(Module, Binary, unknown_framework(), 5000)
     ),
     ?assertEqual(5, Module:add(2, 3)),
     cleanup(Module, File).
+
+-spec unknown_framework() -> dynamic().
+unknown_framework() ->
+    no_such_framework.
 
 unloadable_mutant_is_skipped_not_fatal_test() ->
     {Module, _Forms, File} = build(mutate_test_unloadable, tested_source()),
