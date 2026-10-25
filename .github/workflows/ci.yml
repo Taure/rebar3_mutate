@@ -21,6 +21,7 @@ jobs:
       enable-audit: false
       otp-version: '28'
       enable-ex-doc: true
+      enable-elp-eqwalize: true
 
   release:
     needs: ci
