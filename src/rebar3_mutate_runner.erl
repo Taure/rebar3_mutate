@@ -25,9 +25,9 @@ compile_mutant(Module, MutatedForms) ->
     {ok, binary()} | {compile_error, term()}.
 compile_mutant(Module, MutatedForms, CompileOpts) ->
     case compile:forms(MutatedForms, CompileOpts) of
-        {ok, Module, Binary} ->
+        {ok, Module, Binary} when is_binary(Binary) ->
             {ok, Binary};
-        {ok, Module, Binary, _Warnings} ->
+        {ok, Module, Binary, _Warnings} when is_binary(Binary) ->
             {ok, Binary};
         {error, Errors, _Warnings} ->
             {compile_error, Errors}
