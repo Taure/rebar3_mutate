@@ -521,8 +521,9 @@ find_source_files(SrcDir, Modules, ExcludeModules) ->
         _ -> [F || F <- Selected, not lists:member(module_of(F), ExcludeModules)]
     end.
 
+-spec module_of(file:filename()) -> module().
 module_of(File) ->
-    list_to_atom(filename:basename(File, ".erl")).
+    list_to_atom(filename:rootname(filename:basename(File), ".erl")).
 
 filter_files_by_diff(Files, none) ->
     Files;
