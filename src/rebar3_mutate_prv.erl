@@ -2,7 +2,7 @@
 
 -behaviour(provider).
 
--export([init/1, do/1, format_error/1, gate_decision/3]).
+-export([init/1, do/1, format_error/1, gate_decision/3, resolve_test_spec/2, mapping_ignored/1]).
 
 -define(PROVIDER, mutate).
 -define(DEPS, [{default, app_discovery}, {default, compile}]).
@@ -64,7 +64,9 @@ format_error(Reason) ->
 
 options(State) ->
     {Args, _} = rebar_state:command_parsed_args(State),
-    #{
+    #{eunit_tests := EunitTests} = config(State),
+    Opts = #{
+        eunit_tests => EunitTests,
         timeout => proplists:get_value(timeout, Args, ?DEFAULT_TIMEOUT),
         operators => parse_operators(proplists:get_value(operators, Args, undefined)),
         modules => parse_modules(proplists:get_value(module, Args, undefined)),
@@ -75,7 +77,28 @@ options(State) ->
         format => parse_format(proplists:get_value(format, Args, undefined)),
         workers => proplists:get_value(workers, Args, ?DEFAULT_WORKERS),
         diff => parse_diff(proplists:get_value(diff, Args, undefined))
-    }.
+    },
+    warn_ignored_mapping(Opts),
+    Opts.
+
+warn_ignored_mapping(Opts) ->
+    case mapping_ignored(Opts) of
+        true ->
+            rebar_api:warn("eunit_tests in rebar.config is ignored with --test-framework ct", []);
+        false ->
+            ok
+    end.
+
+-spec mapping_ignored(#{framework := eunit | ct, eunit_tests := map(), atom() => term()}) ->
+    boolean().
+mapping_ignored(#{framework := ct, eunit_tests := EunitTests}) -> map_size(EunitTests) > 0;
+mapping_ignored(_Opts) -> false.
+
+config(State) ->
+    case rebar3_mutate_config:parse(rebar_state:get(State, mutate, [])) of
+        {ok, Config} -> Config;
+        {error, Message} -> throw({mutate_error, Message})
+    end.
 
 run(State, Opts) ->
     Targets = collect_targets(rebar_state:project_apps(State), Opts),
@@ -156,8 +179,16 @@ process_target(Module, Forms, File, AppOpts, Opts) ->
             rebar_api:warn("~s: skipped (~p)", [Module, Reason]),
             {skipped, Module, Reason};
         {ok, TestSpec} ->
+            log_test_spec(Module, TestSpec),
             baseline_then_mutate(Module, Forms, File, TestSpec, AppOpts, Opts)
     end.
+
+log_test_spec(Module, {eunit, Extra}) ->
+    rebar_api:info("~s: also counting tests in ~s", [
+        Module, lists:join(", ", [atom_to_list(M) || M <- Extra])
+    ]);
+log_test_spec(_Module, _TestSpec) ->
+    ok.
 
 baseline_then_mutate(Module, Forms, File, TestSpec, AppOpts, #{timeout := Timeout} = Opts) ->
     BaselineTimeout = max(Timeout * 4, ?BASELINE_TIMEOUT_FLOOR),
@@ -385,8 +416,13 @@ parse_diff(BaseRef) ->
             throw({mutate_error, io_lib:format("Cannot diff against '~s': ~p", [BaseRef, Reason])})
     end.
 
-resolve_test_spec(_Module, #{framework := eunit}) ->
-    {ok, eunit};
+-spec resolve_test_spec(module(), map()) ->
+    {ok, rebar3_mutate_runner:test_spec()} | {error, term()}.
+resolve_test_spec(Module, #{framework := eunit, eunit_tests := EunitTests}) ->
+    case EunitTests of
+        #{Module := Extra} -> {ok, {eunit, Extra}};
+        #{} -> {ok, eunit}
+    end;
 resolve_test_spec(_Module, #{framework := ct, suite := Suite}) when Suite =/= undefined ->
     {ok, {ct, list_to_atom(Suite)}};
 resolve_test_spec(Module, #{framework := ct}) ->

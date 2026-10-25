@@ -40,6 +40,47 @@ only_untestable_mutants_fails_the_gate_test() ->
     ?assertEqual(0, rebar3_mutate_report:testable(Counts)),
     ?assertMatch({fail, _}, rebar3_mutate_prv:gate_decision(Counts, 80.0, none)).
 
+%%====================================================================
+%% Config
+%%====================================================================
+
+invalid_config_stops_the_run_test() ->
+    State0 = rebar_state:set(rebar_state:new(), mutate, [{eunit_test, #{}}]),
+    State = rebar_state:command_parsed_args(State0, {[], []}),
+    ?assertMatch(
+        {error, {rebar3_mutate_prv, "Unknown mutate option eunit_test" ++ _}},
+        rebar3_mutate_prv:do(State)
+    ).
+
+eunit_mapping_is_reported_as_ignored_under_ct_test() ->
+    Mapping = #{my_module => [integration_tests]},
+    ?assert(rebar3_mutate_prv:mapping_ignored(#{framework => ct, eunit_tests => Mapping})),
+    ?assertNot(rebar3_mutate_prv:mapping_ignored(#{framework => ct, eunit_tests => #{}})),
+    ?assertNot(rebar3_mutate_prv:mapping_ignored(#{framework => eunit, eunit_tests => Mapping})).
+
+%%====================================================================
+%% Test spec resolution
+%%====================================================================
+
+unmapped_module_keeps_plain_eunit_test() ->
+    Opts = #{framework => eunit, eunit_tests => #{other_module => [other_module_checks]}},
+    ?assertEqual({ok, eunit}, rebar3_mutate_prv:resolve_test_spec(my_module, Opts)).
+
+mapped_module_gets_its_extra_test_modules_test() ->
+    Opts = #{framework => eunit, eunit_tests => #{my_module => [integration_tests, sandbox_tests]}},
+    ?assertEqual(
+        {ok, {eunit, [integration_tests, sandbox_tests]}},
+        rebar3_mutate_prv:resolve_test_spec(my_module, Opts)
+    ).
+
+eunit_mapping_does_not_apply_to_ct_test() ->
+    Opts = #{
+        framework => ct,
+        suite => "my_SUITE",
+        eunit_tests => #{my_module => [integration_tests]}
+    },
+    ?assertEqual({ok, {ct, my_SUITE}}, rebar3_mutate_prv:resolve_test_spec(my_module, Opts)).
+
 counts(Killed, Survived) ->
     #{
         killed => Killed,
