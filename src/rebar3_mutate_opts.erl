@@ -2,12 +2,17 @@
 
 -export([epp/2, compile/1]).
 
+-type epp_option() ::
+    {includes, [file:filename()]} | {macros, [{atom(), term()}]} | {features, [atom()]}.
+
+-export_type([epp_option/0]).
+
 %% Translates the project's erl_opts into options for epp and for compile:forms.
 %%
 %% Without this, a module is parsed with only TEST defined, so anything behind
 %% -ifdef resolves to the branch the project does not build: the plugin mutates
 %% code that never ships, reports a score for it, and says nothing.
--spec epp([term()], [file:filename()]) -> [term()].
+-spec epp([term()], [file:filename()]) -> [epp_option()].
 epp(ErlOpts, IncludeDirs) ->
     [
         {includes, IncludeDirs ++ includes(ErlOpts)},
@@ -20,7 +25,7 @@ epp(ErlOpts, IncludeDirs) ->
 %% not. warnings_as_errors is deliberately dropped - a mutant routinely leaves a
 %% variable unused, and turning that into a compile error would quietly shrink
 %% the pool of mutants that ever run a test.
--spec compile([term()]) -> [term()].
+-spec compile([dynamic()]) -> [compile:option()].
 compile(ErlOpts) ->
     [binary, return_errors] ++ [Opt || Opt <- ErlOpts, forwardable(Opt)].
 

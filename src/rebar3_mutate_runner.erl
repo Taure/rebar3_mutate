@@ -21,7 +21,7 @@
 compile_mutant(Module, MutatedForms) ->
     compile_mutant(Module, MutatedForms, [binary, return_errors]).
 
--spec compile_mutant(atom(), [erl_parse:abstract_form()], [term()]) ->
+-spec compile_mutant(atom(), [erl_parse:abstract_form()], [compile:option()]) ->
     {ok, binary()} | {compile_error, term()}.
 compile_mutant(Module, MutatedForms, CompileOpts) ->
     case compile:forms(MutatedForms, CompileOpts) of
@@ -37,7 +37,9 @@ compile_mutant(Module, MutatedForms, CompileOpts) ->
 run_mutant(Module, MutatedForms, TestSpec, Timeout) ->
     run_mutant(Module, MutatedForms, TestSpec, Timeout, [binary, return_errors]).
 
--spec run_mutant(atom(), [erl_parse:abstract_form()], test_spec(), pos_integer(), [term()]) ->
+-spec run_mutant(
+    atom(), [erl_parse:abstract_form()], test_spec(), pos_integer(), [compile:option()]
+) ->
     verdict().
 run_mutant(Module, MutatedForms, TestSpec, Timeout, CompileOpts) ->
     case compile_mutant(Module, MutatedForms, CompileOpts) of

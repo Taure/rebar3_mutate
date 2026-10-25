@@ -28,7 +28,7 @@
 %% the project builds it. epp answers {ok, Forms} even when it could not resolve
 %% an include or a macro, embedding {error, _} forms and dropping the functions
 %% around them, so a parse that lost anything is rejected rather than scored.
--spec parse_file(file:filename(), [term()]) ->
+-spec parse_file(file:filename(), [rebar3_mutate_opts:epp_option()]) ->
     {ok, atom(), [erl_parse:abstract_form()]} | {error, term()}.
 parse_file(File, EppOpts) ->
     case epp:parse_file(File, EppOpts) of
