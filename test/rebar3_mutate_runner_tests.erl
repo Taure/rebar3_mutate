@@ -56,7 +56,7 @@ original_is_restored_when_the_test_run_raises_test() ->
     {ok, Binary} = rebar3_mutate_runner:compile_mutant(Module, Forms),
     ?assertMatch(
         {skipped, {unknown_test_framework, no_such_framework}},
-        rebar3_mutate_runner:load_and_test(Module, Binary, no_such_framework, 5000)
+        apply(rebar3_mutate_runner, load_and_test, [Module, Binary, no_such_framework, 5000])
     ),
     ?assertEqual(5, Module:add(2, 3)),
     cleanup(Module, File).
