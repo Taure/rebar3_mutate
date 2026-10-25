@@ -205,7 +205,7 @@ log_test_spec(_Module, _TestSpec) ->
 %% points there is nothing to protect, so the suite is not run at all.
 -spec baseline_then_mutate(
     module(),
-    [erl_parse:abstract_form()],
+    rebar3_mutate_ast:forms(),
     file:filename(),
     rebar3_mutate_runner:test_spec(),
     map(),

@@ -16,15 +16,15 @@
 
 -export_type([test_spec/0, verdict/0]).
 
--spec compile_mutant(atom(), [erl_parse:abstract_form()]) ->
+-spec compile_mutant(atom(), rebar3_mutate_ast:forms()) ->
     {ok, binary()} | {compile_error, term()}.
 compile_mutant(Module, MutatedForms) ->
     compile_mutant(Module, MutatedForms, [binary, return_errors]).
 
--spec compile_mutant(atom(), [erl_parse:abstract_form()], [compile:option()]) ->
+-spec compile_mutant(atom(), rebar3_mutate_ast:forms(), [compile:option()]) ->
     {ok, binary()} | {compile_error, term()}.
 compile_mutant(Module, MutatedForms, CompileOpts) ->
-    case compile:forms(MutatedForms, CompileOpts) of
+    case compile_forms(MutatedForms, CompileOpts) of
         {ok, Module, Binary} when is_binary(Binary) ->
             {ok, Binary};
         {ok, Module, Binary, _Warnings} when is_binary(Binary) ->
@@ -33,12 +33,16 @@ compile_mutant(Module, MutatedForms, CompileOpts) ->
             {compile_error, Errors}
     end.
 
--spec run_mutant(atom(), [erl_parse:abstract_form()], test_spec(), pos_integer()) -> verdict().
+-spec compile_forms(dynamic(), [compile:option()]) -> compile:comp_ret().
+compile_forms(Forms, CompileOpts) ->
+    compile:forms(Forms, CompileOpts).
+
+-spec run_mutant(atom(), rebar3_mutate_ast:forms(), test_spec(), pos_integer()) -> verdict().
 run_mutant(Module, MutatedForms, TestSpec, Timeout) ->
     run_mutant(Module, MutatedForms, TestSpec, Timeout, [binary, return_errors]).
 
 -spec run_mutant(
-    atom(), [erl_parse:abstract_form()], test_spec(), pos_integer(), [compile:option()]
+    atom(), rebar3_mutate_ast:forms(), test_spec(), pos_integer(), [compile:option()]
 ) ->
     verdict().
 run_mutant(Module, MutatedForms, TestSpec, Timeout, CompileOpts) ->
