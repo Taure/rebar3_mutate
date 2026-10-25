@@ -56,10 +56,14 @@ original_is_restored_when_the_test_run_raises_test() ->
     {ok, Binary} = rebar3_mutate_runner:compile_mutant(Module, Forms),
     ?assertMatch(
         {skipped, {unknown_test_framework, no_such_framework}},
-        apply(rebar3_mutate_runner, load_and_test, [Module, Binary, no_such_framework, 5000])
+        rebar3_mutate_runner:load_and_test(Module, Binary, unknown_framework(), 5000)
     ),
     ?assertEqual(5, Module:add(2, 3)),
     cleanup(Module, File).
+
+-spec unknown_framework() -> dynamic().
+unknown_framework() ->
+    no_such_framework.
 
 unloadable_mutant_is_skipped_not_fatal_test() ->
     {Module, _Forms, File} = build(mutate_test_unloadable, tested_source()),
