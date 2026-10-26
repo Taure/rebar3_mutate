@@ -195,8 +195,9 @@ eunit_verdict(Tests) ->
 in_worker(Fun, Timeout) ->
     Parent = self(),
     Ref = make_ref(),
+    Before = maps:from_keys(erlang:processes(), true),
     Original = group_leader(),
-    Leader = spawn(fun() -> forward_io(Original) end),
+    Leader = spawn(fun() -> forward_io(Original, erlang:monitor(process, Parent)) end),
     {Pid, MRef} = spawn_monitor(fun() ->
         group_leader(Leader, self()),
         Parent ! {Ref, Fun()}
@@ -208,60 +209,70 @@ in_worker(Fun, Timeout) ->
         after Timeout -> timeout
         end,
     erlang:demonitor(MRef, [flush]),
-    stop_run(Leader),
+    stop_run(Leader, Before),
     Verdict.
 
--spec forward_io(pid()) -> no_return().
-forward_io(Original) ->
+-spec forward_io(pid(), reference()) -> ok.
+forward_io(Original, CallerRef) ->
     receive
         {io_request, _From, _ReplyAs, _Request} = Request ->
             Original ! Request,
-            forward_io(Original);
+            forward_io(Original, CallerRef);
+        {'DOWN', CallerRef, process, _Caller, _Reason} ->
+            ok;
         _Other ->
-            forward_io(Original)
+            forward_io(Original, CallerRef)
     end.
 
 %% Every process a run starts inherits Leader as its group leader, directly or
-%% through one of eunit's own group leaders, including processes a test spawned
-%% without a link. Killing the worker alone left those running into the next
-%% mutant. A killed process can no longer be asked for its group leader, so the
-%% pids already killed stay known, and the sweep repeats until a pass finds
-%% nothing new, which also catches anything spawned while the sweep ran.
--spec stop_run(pid()) -> ok.
-stop_run(Leader) ->
-    stop_members(#{Leader => true}),
+%% through one of eunit's own group leaders. eunit stops a test's group leader
+%% when the test ends, and a dead process cannot be asked for its own, so a
+%% chain that ends at a pid that died after the run began also counts: only a
+%% process started during the run can have one. Killed pids stay known for the
+%% same reason, and the sweep repeats until a pass finds nothing new, which
+%% catches anything spawned while it ran.
+-spec stop_run(pid(), #{pid() => true}) -> ok.
+stop_run(Leader, Before) ->
+    stop_members(#{Leader => true}, Before),
     exit(Leader, kill),
     ok.
 
--spec stop_members(#{pid() => true}) -> ok.
-stop_members(Known) ->
+-spec stop_members(#{pid() => true}, #{pid() => true}) -> ok.
+stop_members(Known, Before) ->
     Self = self(),
     case
         [
             Pid
          || Pid <- erlang:processes(),
             Pid =/= Self,
+            not is_map_key(Pid, Before),
             not is_map_key(Pid, Known),
-            leads_to(Pid, Known, [Pid])
+            leads_to(Pid, Known, Before, [Pid])
         ]
     of
         [] ->
             ok;
         Members ->
             kill_and_await([{Pid, erlang:monitor(process, Pid)} || Pid <- Members]),
-            stop_members(maps:merge(Known, maps:from_keys(Members, true)))
+            stop_members(maps:merge(Known, maps:from_keys(Members, true)), Before)
     end.
 
--spec leads_to(pid(), #{pid() => true}, [pid()]) -> boolean().
-leads_to(Pid, Known, Seen) ->
+-spec leads_to(pid(), #{pid() => true}, #{pid() => true}, [pid()]) -> boolean().
+leads_to(Pid, Known, Before, Seen) ->
     case process_info(Pid, group_leader) of
         {group_leader, Leader} when is_map_key(Leader, Known) ->
             true;
         {group_leader, Leader} when node(Leader) =:= node() ->
-            not lists:member(Leader, Seen) andalso leads_to(Leader, Known, [Leader | Seen]);
+            not lists:member(Leader, Seen) andalso
+                (started_and_died(Leader, Before) orelse
+                    leads_to(Leader, Known, Before, [Leader | Seen]));
         _ ->
             false
     end.
+
+-spec started_and_died(pid(), #{pid() => true}) -> boolean().
+started_and_died(Pid, Before) ->
+    not is_map_key(Pid, Before) andalso not is_process_alive(Pid).
 
 -spec kill_and_await([{pid(), reference()}]) -> ok.
 kill_and_await([]) ->

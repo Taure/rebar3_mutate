@@ -177,9 +177,6 @@ timed_out_last_mutant_keeps_the_module_scored(Dir) ->
         )
     end}.
 
-%% The purge on restore only kills processes running mutant code. A test
-%% process blocked in test code kept its registered name, and the check after
-%% the last mutant then failed a repeatable suite.
 mutant_stuck_in_test_code_does_not_reach_the_next_run(Dir) ->
     {timeout, 60, fun() ->
         {Module, Forms, File} = build(Dir, mutate_prv_stuck, target_source()),
@@ -192,8 +189,6 @@ mutant_stuck_in_test_code_does_not_reach_the_next_run(Dir) ->
         )
     end}.
 
-%% pmap reports a dead compile worker as {worker_crash, Reason}, which used to
-%% reach the progress marker and end the whole run with function_clause.
 crashed_compile_worker_is_recorded_as_skipped(Dir) ->
     fun() ->
         {Module, Forms, File} = build(Dir, mutate_prv_crashing, target_source()),
