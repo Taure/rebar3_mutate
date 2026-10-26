@@ -142,7 +142,7 @@ The config is validated before anything runs. Each of these stops the run with a
 - a module's own name or its own `<module>_tests`, which eunit already runs, or both `x` and `x_tests`
 - a test module that contributes no eunit tests (no exported `*_test/0` or `*_test_/0` in it or in its `_tests` module)
 
-Mutants are tested one at a time, but a mutant that times out is abandoned rather than awaited. Restoring the original kills test processes still running the mutated module, yet one blocked elsewhere (for example in test code waiting on the database) can outlive it and overlap the next mutant's run against shared tables. The mapped suites must also be repeatable, each run cleaning up after itself; the plugin checks that (see [Baseline](#baseline)) and fails the module if not.
+Mutants are tested one at a time. The mapped suites must also be repeatable, each run cleaning up after itself; the plugin checks that (see [Baseline](#baseline)) and fails the module if not.
 
 ## Mutation Operators
 
@@ -167,6 +167,10 @@ Before mutating a module, the plugin runs its tests unmutated:
 - **red** -- fail the run; a mutation score computed against a failing suite is meaningless, because every mutant reads as killed
 - **not repeatable** -- the suite must pass twice before mutating and once more after the last mutant; if either run fails, the module fails the run like a red baseline. A suite that leaves state behind (a database row, a registered name, a started application) would otherwise fail every run after the first and make every mutant, even an unchanged one, read as killed. Every module's suite therefore runs N + 3 times for N mutants, mapped or not. A module with no mutation points (for example none in the `--diff` range) is not run at all
 - **no tests** -- skip the module and report it as skipped rather than scoring it 0%
+
+## Timeouts
+
+A mutant whose tests run past `--timeout` is recorded as timed out, and its test run is stopped before the next mutant loads. Every EUnit run gets its own EUnit server, so each test process, and anything a test spawned, descends from the run; when the run ends, the plugin kills every process that still has the run as its group leader and waits for them to exit. A test blocked in its own code (for example waiting on the database) therefore cannot overlap the next mutant's run. Processes a test started under an application are not part of the run and are left alone, except that restoring the original module kills any process still running mutant code.
 
 ## Progress Indicator
 

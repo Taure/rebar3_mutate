@@ -174,34 +174,102 @@ execute(Other, _Module, _Timeout) ->
     {error, {unknown_test_framework, Other}}.
 
 run_eunit(Tests, Timeout) ->
-    in_worker(
-        fun() ->
-            try eunit:test(Tests, [no_tty]) of
-                ok -> pass;
-                error -> fail
-            catch
-                _:_ -> fail
-            end
-        end,
-        Timeout
-    ).
+    in_worker(fun() -> eunit_verdict(Tests) end, Timeout).
+
+%% The shared eunit_server spawns test processes as its own children, out of
+%% reach of the worker's group leader. A server started from the worker makes
+%% the whole run descend from it, so stop_run/1 can find every process in it.
+-spec eunit_verdict(module() | [module()]) -> pass | fail.
+eunit_verdict(Tests) ->
+    Server = eunit:start(undefined),
+    try eunit:test(Server, Tests, [no_tty]) of
+        ok -> pass;
+        error -> fail
+    catch
+        _:_ -> fail
+    end.
 
 %% The worker sends before it exits, and signals between two processes keep
 %% their order, so the result is always ahead of the DOWN in the mailbox.
+-spec in_worker(fun(() -> Result), pos_integer()) -> Result | fail | timeout.
 in_worker(Fun, Timeout) ->
     Parent = self(),
     Ref = make_ref(),
-    {Pid, MRef} = spawn_monitor(fun() -> Parent ! {Ref, Fun()} end),
+    Original = group_leader(),
+    Leader = spawn(fun() -> forward_io(Original) end),
+    {Pid, MRef} = spawn_monitor(fun() ->
+        group_leader(Leader, self()),
+        Parent ! {Ref, Fun()}
+    end),
+    Verdict =
+        receive
+            {Ref, Result} -> Result;
+            {'DOWN', MRef, process, Pid, _Reason} -> fail
+        after Timeout -> timeout
+        end,
+    erlang:demonitor(MRef, [flush]),
+    stop_run(Leader),
+    Verdict.
+
+-spec forward_io(pid()) -> no_return().
+forward_io(Original) ->
     receive
-        {Ref, Result} ->
-            erlang:demonitor(MRef, [flush]),
-            Result;
-        {'DOWN', MRef, process, Pid, _Reason} ->
-            fail
-    after Timeout ->
-        erlang:demonitor(MRef, [flush]),
-        exit(Pid, kill),
-        timeout
+        {io_request, _From, _ReplyAs, _Request} = Request ->
+            Original ! Request,
+            forward_io(Original);
+        _Other ->
+            forward_io(Original)
+    end.
+
+%% Every process a run starts inherits Leader as its group leader, directly or
+%% through one of eunit's own group leaders, including processes a test spawned
+%% without a link. Killing the worker alone left those running into the next
+%% mutant. A killed process can no longer be asked for its group leader, so the
+%% pids already killed stay known, and the sweep repeats until a pass finds
+%% nothing new, which also catches anything spawned while the sweep ran.
+-spec stop_run(pid()) -> ok.
+stop_run(Leader) ->
+    stop_members(#{Leader => true}),
+    exit(Leader, kill),
+    ok.
+
+-spec stop_members(#{pid() => true}) -> ok.
+stop_members(Known) ->
+    Self = self(),
+    case
+        [
+            Pid
+         || Pid <- erlang:processes(),
+            Pid =/= Self,
+            not is_map_key(Pid, Known),
+            leads_to(Pid, Known, [Pid])
+        ]
+    of
+        [] ->
+            ok;
+        Members ->
+            kill_and_await([{Pid, erlang:monitor(process, Pid)} || Pid <- Members]),
+            stop_members(maps:merge(Known, maps:from_keys(Members, true)))
+    end.
+
+-spec leads_to(pid(), #{pid() => true}, [pid()]) -> boolean().
+leads_to(Pid, Known, Seen) ->
+    case process_info(Pid, group_leader) of
+        {group_leader, Leader} when is_map_key(Leader, Known) ->
+            true;
+        {group_leader, Leader} when node(Leader) =:= node() ->
+            not lists:member(Leader, Seen) andalso leads_to(Leader, Known, [Leader | Seen]);
+        _ ->
+            false
+    end.
+
+-spec kill_and_await([{pid(), reference()}]) -> ok.
+kill_and_await([]) ->
+    ok;
+kill_and_await([{Pid, MRef} | Rest]) ->
+    exit(Pid, kill),
+    receive
+        {'DOWN', MRef, process, Pid, _Reason} -> kill_and_await(Rest)
     end.
 
 %%====================================================================
@@ -251,9 +319,9 @@ restore_module(Module, {beam_path, _Path}) ->
         {error, Reason} -> erlang:error({mutant_restore_failed, Module, Reason})
     end.
 
-%% A timed-out mutant's eunit test process belongs to eunit_server, not to the
-%% worker that was killed, so it can still be running mutant code. Purging the
-%% mutant, now the old version, kills it before the next run starts.
+%% stop_run/1 has already ended the run's own processes. One outside it still
+%% running mutant code, such as a server a test started under an application,
+%% is killed by purging the mutant, now the old version, before the next run.
 purge_mutant(Module) ->
     _ = code:purge(Module),
     ok.

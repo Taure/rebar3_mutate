@@ -23,6 +23,29 @@ timeout_test() ->
     ?assertEqual(timed_out, rebar3_mutate_runner:run_mutant(Module, Forms, eunit, 1000)),
     cleanup(Module, File).
 
+%% The test process outlived the timeout because it belongs to eunit_server,
+%% not to the killed worker, and the purge on restore only reaches processes
+%% running mutant code. One blocked in test code ran on into the next mutant.
+timed_out_run_is_stopped_before_returning_test() ->
+    {Module, Forms, File} = build(mutate_test_stuck, tested_source()),
+    {Checks, _, ChecksFile} = build(mutate_test_stuck_checks, stuck_checks_source(Module)),
+    [First | _] = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic]),
+    MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
+    ?assertEqual(
+        timed_out, rebar3_mutate_runner:run_mutant(Module, MutatedForms, {eunit, [Checks]}, 500)
+    ),
+    ?assertEqual(undefined, whereis(mutate_test_stuck_test_process)),
+    ?assertEqual(undefined, whereis(mutate_test_stuck_helper)),
+    cleanup(Checks, ChecksFile),
+    cleanup(Module, File).
+
+completed_run_leaves_no_eunit_server_behind_test() ->
+    {Module, _Forms, File} = build(mutate_test_no_leak, tested_source()),
+    Before = length(erlang:processes()),
+    _ = [rebar3_mutate_runner:run_baseline(Module, eunit, 5000) || _ <- lists:seq(1, 20)],
+    ?assert(length(erlang:processes()) < Before + 10),
+    cleanup(Module, File).
+
 compile_error_test() ->
     BrokenForms = [
         {attribute, 1, module, mutate_test_bad},
@@ -279,6 +302,19 @@ counting_source(Key) ->
     "-include_lib(\"eunit/include/eunit.hrl\").\n"
     "count_test() -> ets:update_counter(mutate_test_runs, " ++ atom_to_list(Key) ++
         ", 1).\n"
+        "-endif.\n".
+
+stuck_checks_source(Target) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "add_test() ->\n"
+    "    register(mutate_test_stuck_test_process, self()),\n"
+    "    spawn(fun() -> register(mutate_test_stuck_helper, self()), timer:sleep(infinity) end),\n"
+    "    case " ++ atom_to_list(Target) ++
+        ":add(2, 3) of\n"
+        "        5 -> ok;\n"
+        "        _ -> timer:sleep(infinity)\n"
+        "    end.\n"
         "-endif.\n".
 
 unrelated_checks_source() ->

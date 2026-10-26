@@ -98,7 +98,8 @@ baseline_repeatability_test_() ->
         fun suite_broken_by_the_mutants_fails_the_baseline/1,
         fun repeatable_suite_is_scored/1,
         fun no_mutation_points_runs_no_baseline/1,
-        fun timed_out_last_mutant_keeps_the_module_scored/1
+        fun timed_out_last_mutant_keeps_the_module_scored/1,
+        fun mutant_stuck_in_test_code_does_not_reach_the_next_run/1
     ]}.
 
 %% Any failing run counts as a kill. A suite that leaves state behind passes
@@ -175,6 +176,21 @@ timed_out_last_mutant_keeps_the_module_scored(Dir) ->
         )
     end}.
 
+%% The purge on restore only kills processes running mutant code. A test
+%% process blocked in test code kept its registered name, and the check after
+%% the last mutant then failed a repeatable suite.
+mutant_stuck_in_test_code_does_not_reach_the_next_run(Dir) ->
+    {timeout, 60, fun() ->
+        {Module, Forms, File} = build(Dir, mutate_prv_stuck, target_source()),
+        {Checks, _, _} = build(Dir, mutate_prv_stuck_checks, stuck_source(Module)),
+        ?assertMatch(
+            {ok, Module, [{_, timed_out}]},
+            rebar3_mutate_prv:baseline_then_mutate(
+                Module, Forms, File, {eunit, [Checks]}, app_opts(), (opts())#{timeout => 1000}
+            )
+        )
+    end}.
+
 counts(Killed, Survived) ->
     #{
         killed => Killed,
@@ -236,6 +252,19 @@ registering_source(Target) ->
     "    ok = " ++ atom_to_list(Target) ++
         ":count(3),\n"
         "    unregister(mutate_prv_victim).\n"
+        "-endif.\n".
+
+stuck_source(Target) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "add_test() ->\n"
+    "    register(mutate_prv_stuck_victim, self()),\n"
+    "    case " ++ atom_to_list(Target) ++
+        ":add(2, 3) of\n"
+        "        5 -> ok;\n"
+        "        _ -> timer:sleep(infinity)\n"
+        "    end,\n"
+        "    unregister(mutate_prv_stuck_victim).\n"
         "-endif.\n".
 
 setup() ->
