@@ -170,7 +170,7 @@ Before mutating a module, the plugin runs its tests unmutated:
 
 ## Timeouts
 
-A mutant whose tests run past `--timeout` is recorded as timed out, and its test run is stopped before the next mutant loads. Every EUnit run gets its own EUnit server, so each test process, and anything a test spawned, descends from the run; when the run ends, the plugin kills every process that still has the run as its group leader and waits for them to exit. A test blocked in its own code (for example waiting on the database) therefore cannot overlap the next mutant's run. Processes a test started under an application are not part of the run and are left alone, except that restoring the original module kills any process still running mutant code.
+A mutant whose tests run past `--timeout` is recorded as timed out, and its test run is stopped before the next mutant loads. Every EUnit run gets its own EUnit server, so each test process, and anything a test spawned, descends from the run; when the run ends, the plugin kills every process that still has the run as its group leader and waits for them to exit. A test blocked in its own code (for example waiting on the database) is stopped before the next mutant's run. The sweep is best effort: a process in test or dependency code that keeps replacing itself with a new process can stay ahead of it. A process outside the run that is linked to a process the sweep kills, and does not trap exits, is taken down with it. Processes a test started under an application are not part of the run and are left alone, except that restoring the original module kills any process still running mutant code.
 
 ## Progress Indicator
 
