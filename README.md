@@ -190,7 +190,7 @@ The plugin reports:
 - **Survived** -- tests did not catch the mutation (indicates a gap)
 - **Timed out** -- tests hung on the mutation
 - **Compile error** -- mutation produced invalid code
-- **Skipped** -- the mutant could not be evaluated (for example a worker crashed)
+- **Skipped** -- the mutant could not be evaluated, for example because it could not be loaded or the worker compiling it crashed (reason `{worker_crash, Reason}`)
 
 The **mutation score** is `killed / (killed + survived + timed out)`. Compile errors and skipped mutants never ran a test, so they are excluded from the denominator. This is the same number `--min-score` gates on.
 
