@@ -320,6 +320,8 @@ run_points(Points, Forms, Module, TestSpec, Timeout, #{compile := CompileOpts}, 
                 progress(
                     Point, rebar3_mutate_runner:load_and_test(Module, Binary, TestSpec, Timeout)
                 );
+            ({Point, {worker_crash, Reason}}) ->
+                progress(Point, {skipped, {worker_crash, Reason}});
             ({Point, Other}) ->
                 progress(Point, Other)
         end,

@@ -98,7 +98,9 @@ baseline_repeatability_test_() ->
         fun suite_broken_by_the_mutants_fails_the_baseline/1,
         fun repeatable_suite_is_scored/1,
         fun no_mutation_points_runs_no_baseline/1,
-        fun timed_out_last_mutant_keeps_the_module_scored/1
+        fun timed_out_last_mutant_keeps_the_module_scored/1,
+        fun mutant_stuck_in_test_code_does_not_reach_the_next_run/1,
+        fun crashed_compile_worker_is_recorded_as_skipped/1
     ]}.
 
 %% Any failing run counts as a kill. A suite that leaves state behind passes
@@ -175,6 +177,32 @@ timed_out_last_mutant_keeps_the_module_scored(Dir) ->
         )
     end}.
 
+mutant_stuck_in_test_code_does_not_reach_the_next_run(Dir) ->
+    {timeout, 60, fun() ->
+        {Module, Forms, File} = build(Dir, mutate_prv_stuck, target_source()),
+        {Checks, _, _} = build(Dir, mutate_prv_stuck_checks, stuck_source(Module)),
+        ?assertMatch(
+            {ok, Module, [{_, timed_out}]},
+            rebar3_mutate_prv:baseline_then_mutate(
+                Module, Forms, File, {eunit, [Checks]}, app_opts(), (opts())#{timeout => 1000}
+            )
+        )
+    end}.
+
+crashed_compile_worker_is_recorded_as_skipped(Dir) ->
+    fun() ->
+        {Module, Forms, File} = build(Dir, mutate_prv_crashing, target_source()),
+        {Checks, _, _} = build(Dir, mutate_prv_crashing_checks, checks_source(Module)),
+        {Transform, _, _} = build(Dir, mutate_prv_renaming_transform, renaming_source()),
+        AppOpts = #{compile => [binary, return_errors, {parse_transform, Transform}]},
+        ?assertMatch(
+            {ok, Module, [{_, {skipped, {worker_crash, _}}}]},
+            rebar3_mutate_prv:baseline_then_mutate(
+                Module, Forms, File, {eunit, [Checks]}, AppOpts, opts()
+            )
+        )
+    end.
+
 counts(Killed, Survived) ->
     #{
         killed => Killed,
@@ -237,6 +265,28 @@ registering_source(Target) ->
         ":count(3),\n"
         "    unregister(mutate_prv_victim).\n"
         "-endif.\n".
+
+stuck_source(Target) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "add_test() ->\n"
+    "    register(mutate_prv_stuck_victim, self()),\n"
+    "    case " ++ atom_to_list(Target) ++
+        ":add(2, 3) of\n"
+        "        5 -> ok;\n"
+        "        _ -> timer:sleep(infinity)\n"
+        "    end,\n"
+        "    unregister(mutate_prv_stuck_victim).\n"
+        "-endif.\n".
+
+%% Renaming the module makes compile:forms/2 succeed for a module other than
+%% the one asked for, which compile_mutant does not match, so its worker dies.
+renaming_source() ->
+    "-export([parse_transform/2]).\n"
+    "parse_transform(Forms, _Options) ->\n"
+    "    [rename(Form) || Form <- Forms].\n"
+    "rename({attribute, Anno, module, _}) -> {attribute, Anno, module, mutate_prv_renamed};\n"
+    "rename(Form) -> Form.\n".
 
 setup() ->
     Dir = "/tmp/rebar3_mutate_prv_test_" ++ os:getpid(),

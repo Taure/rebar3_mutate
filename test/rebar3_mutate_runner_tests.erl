@@ -23,6 +23,60 @@ timeout_test() ->
     ?assertEqual(timed_out, rebar3_mutate_runner:run_mutant(Module, Forms, eunit, 1000)),
     cleanup(Module, File).
 
+timed_out_run_is_stopped_before_returning_test() ->
+    {Module, Forms, File} = build(mutate_test_stuck, tested_source()),
+    {Checks, _, ChecksFile} = build(mutate_test_stuck_checks, stuck_checks_source(Module)),
+    try
+        [First | _] = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic]),
+        MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
+        ?assertEqual(
+            timed_out,
+            rebar3_mutate_runner:run_mutant(Module, MutatedForms, {eunit, [Checks]}, 500)
+        ),
+        ?assertEqual(undefined, whereis(mutate_test_stuck_test_process)),
+        ?assertEqual(undefined, whereis(mutate_test_stuck_helper))
+    after
+        cleanup(Checks, ChecksFile),
+        cleanup(Module, File)
+    end.
+
+%% eunit gives each test its own group leader and stops it when the test ends,
+%% so an unlinked helper is left pointing at a dead group leader.
+helper_of_a_passing_test_is_stopped_test() ->
+    {Module, _Forms, File} = build(mutate_test_helper_pass, bare_source()),
+    {Checks, _, ChecksFile} = build(mutate_test_helper_pass_checks, helper_source(passing)),
+    try
+        ?assertMatch({ok, _Ms}, rebar3_mutate_runner:run_baseline(Module, {eunit, [Checks]}, 5000)),
+        ?assertEqual(undefined, whereis(mutate_test_helper))
+    after
+        cleanup(Checks, ChecksFile),
+        cleanup(Module, File)
+    end.
+
+helper_of_a_test_eunit_timed_out_is_stopped_test() ->
+    {Module, _Forms, File} = build(mutate_test_helper_timeout, bare_source()),
+    {Checks, _, ChecksFile} = build(mutate_test_helper_timeout_checks, helper_source(blocking)),
+    try
+        ?assertMatch(
+            {failed, tests_failing},
+            rebar3_mutate_runner:run_baseline(Module, {eunit, [Checks]}, 5000)
+        ),
+        ?assertEqual(undefined, whereis(mutate_test_helper))
+    after
+        cleanup(Checks, ChecksFile),
+        cleanup(Module, File)
+    end.
+
+completed_run_leaves_no_process_behind_test() ->
+    {Module, _Forms, File} = build(mutate_test_no_leak, tested_source()),
+    try
+        Before = erlang:processes(),
+        _ = [rebar3_mutate_runner:run_baseline(Module, eunit, 5000) || _ <- lists:seq(1, 20)],
+        ?assert(length(erlang:processes() -- Before) < 3)
+    after
+        cleanup(Module, File)
+    end.
+
 compile_error_test() ->
     BrokenForms = [
         {attribute, 1, module, mutate_test_bad},
@@ -279,6 +333,38 @@ counting_source(Key) ->
     "-include_lib(\"eunit/include/eunit.hrl\").\n"
     "count_test() -> ets:update_counter(mutate_test_runs, " ++ atom_to_list(Key) ++
         ", 1).\n"
+        "-endif.\n".
+
+stuck_checks_source(Target) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "add_test() ->\n"
+    "    register(mutate_test_stuck_test_process, self()),\n"
+    "    spawn(fun() -> register(mutate_test_stuck_helper, self()), timer:sleep(infinity) end),\n"
+    "    case " ++ atom_to_list(Target) ++
+        ":add(2, 3) of\n"
+        "        5 -> ok;\n"
+        "        _ -> timer:sleep(infinity)\n"
+        "    end.\n"
+        "-endif.\n".
+
+helper_source(Ending) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "helper_test_() ->\n"
+    "    {timeout, 1, fun() ->\n"
+    "        Parent = self(),\n"
+    "        spawn(fun() ->\n"
+    "            register(mutate_test_helper, self()),\n"
+    "            Parent ! registered,\n"
+    "            receive stop -> ok end\n"
+    "        end),\n"
+    "        receive registered -> ok end,\n"
+    "        end_with(" ++ atom_to_list(Ending) ++
+        ")\n"
+        "    end}.\n"
+        "end_with(passing) -> ok;\n"
+        "end_with(blocking) -> receive never -> ok end.\n"
         "-endif.\n".
 
 unrelated_checks_source() ->

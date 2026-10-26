@@ -168,7 +168,7 @@ list_skipped(Results) ->
         [] ->
             ok;
         Reasons ->
-            rebar_api:warn("~B mutant(s) skipped: ~p", [
-                length(Reasons), lists:usort(Reasons)
+            rebar_api:warn("~B mutant(s) skipped: ~P", [
+                length(Reasons), lists:usort(Reasons), 30
             ])
     end.
