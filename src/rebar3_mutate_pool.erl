@@ -10,17 +10,12 @@
 %% without sending one is reported through OnCrash instead of being dropped,
 %% which previously removed the task from both the numerator and the
 %% denominator of the score.
--spec pmap(fun((Task) -> Result), [Task], pos_integer()) -> [Result | Crash] when
-    Task :: term(),
-    Result :: term(),
-    Crash :: term().
+-spec pmap(fun((Task) -> Result), [Task], pos_integer()) -> [Result | {worker_crash, term()}].
 pmap(Fun, Tasks, MaxWorkers) ->
     pmap(Fun, Tasks, MaxWorkers, fun(Reason) -> {worker_crash, Reason} end).
 
 -spec pmap(fun((Task) -> Result), [Task], pos_integer(), fun((term()) -> Crash)) ->
-    [Result | Crash]
-when
-    Task :: term(), Result :: term(), Crash :: term().
+    [Result | Crash].
 pmap(_Fun, [], _MaxWorkers, _OnCrash) ->
     [];
 pmap(Fun, Tasks, MaxWorkers, OnCrash) ->

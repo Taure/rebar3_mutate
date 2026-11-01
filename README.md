@@ -114,6 +114,36 @@ rebar3 mutate --diff origin/main
 
 `--workers` parallelises mutant *compilation* only. Mutants are loaded and tested one at a time, because the code server holds at most two versions of a module.
 
+## Configuration
+
+Options that belong to the project rather than to one run go in a `mutate` section of `rebar.config`.
+
+### Extra EUnit test modules
+
+By default a module is scored against its own tests only: `<module>_tests` and any test functions it exports. A module whose behaviour is exercised by integration test modules then scores close to 0% although those suites kill its mutants. Map it to the test modules that count for it:
+
+```erlang
+{mutate, [
+    {eunit_tests, #{
+        kura_repo_worker => [kura_integration_assoc_tests],
+        kura_preloader => [kura_integration_assoc_tests, kura_sandbox_tests]
+    }}
+]}.
+```
+
+For a mapped module the baseline and every mutant run `eunit:test([Module | ExtraTestModules], [no_tty])`, so the module's own tests still count. Unmapped modules behave as before, apart from the repeatability check in [Baseline](#baseline). The mapping only applies with `-f eunit`; with `-f ct` it is ignored with a warning.
+
+The config is validated before anything runs. Each of these stops the run with an error rather than being skipped, so a green score always means the listed tests ran:
+
+- an unknown or repeated key
+- a non-atom module name, or a value that is not a non-empty list
+- a source or test module that is not on the code path
+- a test module listed twice for the same module
+- a module's own name or its own `<module>_tests`, which eunit already runs, or both `x` and `x_tests`
+- a test module that contributes no eunit tests (no exported `*_test/0` or `*_test_/0` in it or in its `_tests` module)
+
+Mutants are tested one at a time. The mapped suites must also be repeatable, each run cleaning up after itself; the plugin checks that (see [Baseline](#baseline)) and fails the module if not.
+
 ## Mutation Operators
 
 | Operator | Mutations |
@@ -135,7 +165,12 @@ Before mutating a module, the plugin runs its tests unmutated:
 
 - **green** -- proceed, and use the measured suite time to sanity-check `--timeout`
 - **red** -- fail the run; a mutation score computed against a failing suite is meaningless, because every mutant reads as killed
+- **not repeatable** -- the suite must pass twice before mutating and once more after the last mutant; if either run fails, the module fails the run like a red baseline. A suite that leaves state behind (a database row, a registered name, a started application) would otherwise fail every run after the first and make every mutant, even an unchanged one, read as killed. Every module's suite therefore runs N + 3 times for N mutants, mapped or not. A module with no mutation points (for example none in the `--diff` range) is not run at all
 - **no tests** -- skip the module and report it as skipped rather than scoring it 0%
+
+## Timeouts
+
+A mutant whose tests run past `--timeout` is recorded as timed out, and its test run is stopped before the next mutant loads. Each EUnit and Common Test run is given a group leader of its own, and every EUnit run its own EUnit server, so test processes and anything they spawn inherit that group leader, directly or through EUnit's per-test group leaders. When the run ends, the plugin kills every process started during the run whose group leader chain leads back to the run, or ends at a group leader that was started during the run and has since exited (EUnit stops a test's group leader when the test ends, leaving unlinked helpers pointing at it), and waits for them to exit. Common Test runs go through the same sweep. A test blocked in its own code (for example waiting on the database) is stopped before the next mutant's run. The sweep is best effort: a process in test or dependency code that keeps replacing itself with a new process can stay ahead of it. A process outside the run that is linked to a process the sweep kills, and does not trap exits, is taken down with it. Processes a test started under an application are not part of the run and are left alone, except that restoring the original module kills any process still running mutant code.
 
 ## Progress Indicator
 
@@ -155,7 +190,7 @@ The plugin reports:
 - **Survived** -- tests did not catch the mutation (indicates a gap)
 - **Timed out** -- tests hung on the mutation
 - **Compile error** -- mutation produced invalid code
-- **Skipped** -- the mutant could not be evaluated (for example a worker crashed)
+- **Skipped** -- the mutant could not be evaluated, for example because it could not be loaded or the worker compiling it crashed (reason `{worker_crash, Reason}`)
 
 The **mutation score** is `killed / (killed + survived + timed out)`. Compile errors and skipped mutants never ran a test, so they are excluded from the denominator. This is the same number `--min-score` gates on.
 

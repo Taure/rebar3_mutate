@@ -23,6 +23,60 @@ timeout_test() ->
     ?assertEqual(timed_out, rebar3_mutate_runner:run_mutant(Module, Forms, eunit, 1000)),
     cleanup(Module, File).
 
+timed_out_run_is_stopped_before_returning_test() ->
+    {Module, Forms, File} = build(mutate_test_stuck, tested_source()),
+    {Checks, _, ChecksFile} = build(mutate_test_stuck_checks, stuck_checks_source(Module)),
+    try
+        [First | _] = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic]),
+        MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
+        ?assertEqual(
+            timed_out,
+            rebar3_mutate_runner:run_mutant(Module, MutatedForms, {eunit, [Checks]}, 500)
+        ),
+        ?assertEqual(undefined, whereis(mutate_test_stuck_test_process)),
+        ?assertEqual(undefined, whereis(mutate_test_stuck_helper))
+    after
+        cleanup(Checks, ChecksFile),
+        cleanup(Module, File)
+    end.
+
+%% eunit gives each test its own group leader and stops it when the test ends,
+%% so an unlinked helper is left pointing at a dead group leader.
+helper_of_a_passing_test_is_stopped_test() ->
+    {Module, _Forms, File} = build(mutate_test_helper_pass, bare_source()),
+    {Checks, _, ChecksFile} = build(mutate_test_helper_pass_checks, helper_source(passing)),
+    try
+        ?assertMatch({ok, _Ms}, rebar3_mutate_runner:run_baseline(Module, {eunit, [Checks]}, 5000)),
+        ?assertEqual(undefined, whereis(mutate_test_helper))
+    after
+        cleanup(Checks, ChecksFile),
+        cleanup(Module, File)
+    end.
+
+helper_of_a_test_eunit_timed_out_is_stopped_test() ->
+    {Module, _Forms, File} = build(mutate_test_helper_timeout, bare_source()),
+    {Checks, _, ChecksFile} = build(mutate_test_helper_timeout_checks, helper_source(blocking)),
+    try
+        ?assertMatch(
+            {failed, tests_failing},
+            rebar3_mutate_runner:run_baseline(Module, {eunit, [Checks]}, 5000)
+        ),
+        ?assertEqual(undefined, whereis(mutate_test_helper))
+    after
+        cleanup(Checks, ChecksFile),
+        cleanup(Module, File)
+    end.
+
+completed_run_leaves_no_process_behind_test() ->
+    {Module, _Forms, File} = build(mutate_test_no_leak, tested_source()),
+    try
+        Before = erlang:processes(),
+        _ = [rebar3_mutate_runner:run_baseline(Module, eunit, 5000) || _ <- lists:seq(1, 20)],
+        ?assert(length(erlang:processes() -- Before) < 3)
+    after
+        cleanup(Module, File)
+    end.
+
 compile_error_test() ->
     BrokenForms = [
         {attribute, 1, module, mutate_test_bad},
@@ -46,7 +100,9 @@ original_is_restored_after_a_mutant_runs_test() ->
     MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
     _ = rebar3_mutate_runner:run_mutant(Module, MutatedForms, eunit, 5000),
     ?assertEqual(5, Module:add(2, 3)),
-    ?assertEqual(".beam", filename:extension(code:which(Module))),
+    Path = code:which(Module),
+    true = is_list(Path),
+    ?assertEqual(".beam", filename:extension(Path)),
     cleanup(Module, File).
 
 original_is_restored_when_the_test_run_raises_test() ->
@@ -54,10 +110,14 @@ original_is_restored_when_the_test_run_raises_test() ->
     {ok, Binary} = rebar3_mutate_runner:compile_mutant(Module, Forms),
     ?assertMatch(
         {skipped, {unknown_test_framework, no_such_framework}},
-        rebar3_mutate_runner:load_and_test(Module, Binary, no_such_framework, 5000)
+        rebar3_mutate_runner:load_and_test(Module, Binary, unknown_framework(), 5000)
     ),
     ?assertEqual(5, Module:add(2, 3)),
     cleanup(Module, File).
+
+-spec unknown_framework() -> dynamic().
+unknown_framework() ->
+    no_such_framework.
 
 unloadable_mutant_is_skipped_not_fatal_test() ->
     {Module, _Forms, File} = build(mutate_test_unloadable, tested_source()),
@@ -121,6 +181,100 @@ has_tests_is_false_for_a_missing_ct_suite_test() ->
     ?assertNot(rebar3_mutate_runner:has_tests(whatever, {ct, no_such_SUITE})).
 
 %%====================================================================
+%% Mapped eunit test modules
+%%====================================================================
+
+has_tests_counts_a_mapped_test_module_test() ->
+    {Module, _Forms, File} = build(mutate_test_mapped_has, bare_source()),
+    {Checks, _, ChecksFile} = build(mutate_test_mapped_has_checks, checks_source(Module, 5)),
+    ?assertNot(rebar3_mutate_runner:has_tests(Module, eunit)),
+    ?assert(rebar3_mutate_runner:has_tests(Module, {eunit, [Checks]})),
+    ?assert(rebar3_mutate_runner:has_tests(Module, {eunit, [no_such_module_tests, Checks]})),
+    cleanup(Checks, ChecksFile),
+    cleanup(Module, File).
+
+has_tests_is_false_when_no_mapped_module_exists_test() ->
+    {Module, _Forms, File} = build(mutate_test_mapped_missing, bare_source()),
+    ?assertNot(rebar3_mutate_runner:has_tests(Module, {eunit, [no_such_module_tests]})),
+    ?assertEqual(
+        no_tests, rebar3_mutate_runner:run_baseline(Module, {eunit, [no_such_module_tests]}, 5000)
+    ),
+    cleanup(Module, File).
+
+%% The case the option exists for: a module with no tests of its own whose
+%% behaviour is covered by an integration test module.
+mapped_tests_kill_a_mutant_the_own_suite_misses_test() ->
+    {Module, Forms, File} = build(mutate_test_mapped_kill, bare_source()),
+    {Checks, _, ChecksFile} = build(mutate_test_mapped_kill_checks, checks_source(Module, 5)),
+    [First | _] = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic]),
+    MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
+    ?assertEqual(survived, rebar3_mutate_runner:run_mutant(Module, MutatedForms, eunit, 5000)),
+    ?assertEqual(
+        killed, rebar3_mutate_runner:run_mutant(Module, MutatedForms, {eunit, [Checks]}, 5000)
+    ),
+    ?assertEqual(5, Module:add(2, 3)),
+    cleanup(Checks, ChecksFile),
+    cleanup(Module, File).
+
+mapped_tests_keep_the_modules_own_tests_test() ->
+    {Module, Forms, File} = build(mutate_test_mapped_own, tested_source()),
+    {Other, _, OtherFile} = build(mutate_test_mapped_own_unrelated, unrelated_checks_source()),
+    [First | _] = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic]),
+    MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
+    ?assertEqual(
+        killed, rebar3_mutate_runner:run_mutant(Module, MutatedForms, {eunit, [Other]}, 5000)
+    ),
+    cleanup(Other, OtherFile),
+    cleanup(Module, File).
+
+listing_the_modules_own_tests_module_runs_it_once_test() ->
+    {Module, _Forms, File} = build(mutate_test_dedup, bare_source()),
+    {Tests, _, TestsFile} = build(mutate_test_dedup_tests, counting_source(own)),
+    {Extra, _, ExtraFile} = build(mutate_test_dedup_extra, counting_source(extra)),
+    ets:new(mutate_test_runs, [named_table, public]),
+    ets:insert(mutate_test_runs, [{own, 0}, {extra, 0}]),
+    ?assertMatch(
+        {ok, _Ms},
+        rebar3_mutate_runner:run_baseline(Module, {eunit, [Tests, Extra, Module, Extra]}, 5000)
+    ),
+    ?assertEqual([{own, 1}], ets:lookup(mutate_test_runs, own)),
+    ?assertEqual([{extra, 1}], ets:lookup(mutate_test_runs, extra)),
+    ets:delete(mutate_test_runs),
+    cleanup(Extra, ExtraFile),
+    cleanup(Tests, TestsFile),
+    cleanup(Module, File).
+
+%% A loadable beam with no test functions must not count, or the baseline is
+%% green without running anything.
+has_tests_ignores_a_mapped_module_without_tests_test() ->
+    {Module, _Forms, File} = build(mutate_test_mapped_vacuous, bare_source()),
+    ?assertNot(rebar3_mutate_runner:has_tests(Module, {eunit, [lists]})),
+    ?assertEqual(no_tests, rebar3_mutate_runner:run_baseline(Module, {eunit, [lists]}, 5000)),
+    cleanup(Module, File).
+
+contributes_tests_reads_exports_from_disk_test() ->
+    {Checks, _, ChecksFile} = build(mutate_test_contrib_checks, unrelated_checks_source()),
+    ?assert(rebar3_mutate_runner:contributes_tests(Checks)),
+    ?assert(rebar3_mutate_runner:contributes_tests(rebar3_mutate_pool)),
+    ?assertNot(rebar3_mutate_runner:contributes_tests(lists)),
+    ?assertNot(rebar3_mutate_runner:contributes_tests(no_such_module)),
+    cleanup(Checks, ChecksFile).
+
+baseline_runs_the_mapped_test_modules_test() ->
+    {Module, _Forms, File} = build(mutate_test_mapped_baseline, bare_source()),
+    {Green, _, GreenFile} = build(mutate_test_mapped_green_checks, checks_source(Module, 5)),
+    {Red, _, RedFile} = build(mutate_test_mapped_red_checks, checks_source(Module, 99)),
+    ?assertEqual(no_tests, rebar3_mutate_runner:run_baseline(Module, eunit, 5000)),
+    ?assertMatch({ok, _Ms}, rebar3_mutate_runner:run_baseline(Module, {eunit, [Green]}, 5000)),
+    ?assertMatch(
+        {failed, tests_failing},
+        rebar3_mutate_runner:run_baseline(Module, {eunit, [Green, Red]}, 5000)
+    ),
+    cleanup(Red, RedFile),
+    cleanup(Green, GreenFile),
+    cleanup(Module, File).
+
+%%====================================================================
 %% Helpers
 %%====================================================================
 
@@ -166,6 +320,58 @@ red_source() ->
 bare_source() ->
     "-export([add/2]).\n"
     "add(A, B) -> A + B.\n".
+
+checks_source(Target, Expected) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "add_test() -> ?assertEqual(" ++ integer_to_list(Expected) ++ ", " ++ atom_to_list(Target) ++
+        ":add(2, 3)).\n"
+        "-endif.\n".
+
+counting_source(Key) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "count_test() -> ets:update_counter(mutate_test_runs, " ++ atom_to_list(Key) ++
+        ", 1).\n"
+        "-endif.\n".
+
+stuck_checks_source(Target) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "add_test() ->\n"
+    "    register(mutate_test_stuck_test_process, self()),\n"
+    "    spawn(fun() -> register(mutate_test_stuck_helper, self()), timer:sleep(infinity) end),\n"
+    "    case " ++ atom_to_list(Target) ++
+        ":add(2, 3) of\n"
+        "        5 -> ok;\n"
+        "        _ -> timer:sleep(infinity)\n"
+        "    end.\n"
+        "-endif.\n".
+
+helper_source(Ending) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "helper_test_() ->\n"
+    "    {timeout, 1, fun() ->\n"
+    "        Parent = self(),\n"
+    "        spawn(fun() ->\n"
+    "            register(mutate_test_helper, self()),\n"
+    "            Parent ! registered,\n"
+    "            receive stop -> ok end\n"
+    "        end),\n"
+    "        receive registered -> ok end,\n"
+    "        end_with(" ++ atom_to_list(Ending) ++
+        ")\n"
+        "    end}.\n"
+        "end_with(passing) -> ok;\n"
+        "end_with(blocking) -> receive never -> ok end.\n"
+        "-endif.\n".
+
+unrelated_checks_source() ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "trivial_test() -> ?assert(true).\n"
+    "-endif.\n".
 
 build(Module, Body) ->
     Dir = tmp_dir(),

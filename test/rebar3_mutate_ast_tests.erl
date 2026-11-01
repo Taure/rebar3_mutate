@@ -16,8 +16,7 @@ apply_mutation_compiles_test() ->
     Points = rebar3_mutate_ast:mutation_points(Forms, Ops),
     [First | _] = Points,
     MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
-    Result = compile:forms(MutatedForms, [binary, return_errors]),
-    ?assertMatch({ok, test_target, _}, Result),
+    ?assertMatch({ok, _}, rebar3_mutate_runner:compile_mutant(test_target, MutatedForms)),
     file:delete(File).
 
 describe_mutation_test() ->
