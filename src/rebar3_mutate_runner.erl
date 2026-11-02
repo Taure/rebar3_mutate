@@ -15,6 +15,7 @@
 
 -define(APPLICATION_STOP_TIMEOUT, 10000).
 -define(APPLICATION_CONTROLLER_TIMEOUT, 2000).
+-define(MASTER_EXIT_TIMEOUT, 1000).
 
 -type test_spec() :: eunit | {eunit, [module()]} | {ct, atom()}.
 -type verdict() :: killed | survived | timed_out | {compile_error, term()} | {skipped, term()}.
@@ -263,25 +264,51 @@ stop_application(App) ->
         kill_application(application_controller:get_master(App)),
         receive
             {'DOWN', MRef, process, Stopper, _Reason} -> ok
-        after ?APPLICATION_STOP_TIMEOUT ->
+        after ?MASTER_EXIT_TIMEOUT ->
+            %% Not seen in practice, since a dead master answers the pending
+            %% stop, but the stopper must not outlive the sweep either way.
             kill_and_await([{Stopper, MRef}])
         end
     end.
 
--spec kill_application(term()) -> ok.
+%% The application's processes are the ones whose group leader is its master.
+%% Killing them, the master's own loop among them, makes the master exit by
+%% itself, which is what lets application_controller finish the pending stop.
+-spec kill_application(pid() | undefined) -> ok.
 kill_application(Master) when is_pid(Master) ->
-    Self = self(),
-    Members = [
-        Pid
-     || Pid <- erlang:processes(),
-        Pid =/= Self,
-        Pid =/= Master,
-        process_info(Pid, group_leader) =:= {group_leader, Master}
-    ],
-    kill_and_await([{Pid, erlang:monitor(process, Pid)} || Pid <- Members]),
-    kill_and_await([{Master, erlang:monitor(process, Master)}]);
-kill_application(_NoMaster) ->
+    MRef = erlang:monitor(process, Master),
+    kill_members(Master),
+    receive
+        {'DOWN', MRef, process, Master, _Reason} -> ok
+    after ?MASTER_EXIT_TIMEOUT ->
+        %% Deliberate safety net: no master has been seen to outlive its
+        %% processes, but one that did would keep the stop pending forever.
+        kill_and_await([{Master, MRef}]),
+        kill_members(Master)
+    end;
+kill_application(undefined) ->
     ok.
+
+%% As application_master:kill_all_procs/0 does, the pass repeats until it finds
+%% nothing, since a process can spawn another while the previous pass runs.
+-spec kill_members(pid()) -> ok.
+kill_members(Master) ->
+    Self = self(),
+    case
+        [
+            Pid
+         || Pid <- erlang:processes(),
+            Pid =/= Self,
+            Pid =/= Master,
+            process_info(Pid, group_leader) =:= {group_leader, Master}
+        ]
+    of
+        [] ->
+            ok;
+        Members ->
+            kill_and_await([{Pid, erlang:monitor(process, Pid)} || Pid <- Members]),
+            kill_members(Master)
+    end.
 
 -spec forward_io(pid(), reference()) -> ok.
 forward_io(Original, CallerRef) ->
