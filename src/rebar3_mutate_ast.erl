@@ -78,9 +78,15 @@ get_point_operator(#mutation_point{operator = Op}) -> Op.
 %%====================================================================
 
 collect(Node, Path, Source, ParentLine, Operators) ->
-    case is_logger_macro(Node) of
-        true -> [];
-        false -> collect_node(Node, Path, Source, ParentLine, Operators)
+    case logger_macro_arguments(Node) of
+        {ok, Arguments} ->
+            Line = node_line(Node, ParentLine),
+            lists:append([
+                collect(Argument, Path ++ RelativePath, Source, Line, Operators)
+             || {RelativePath, Argument} <- Arguments
+            ]);
+        false ->
+            collect_node(Node, Path, Source, ParentLine, Operators)
     end.
 
 collect_node(Node, Path, Source, ParentLine, Operators) ->
@@ -103,56 +109,88 @@ collect_node(Node, Path, Source, ParentLine, Operators) ->
     ],
     Children ++ Own.
 
-%% ?LOG_*/?LOG from logger.hrl expand to
+%% ?LOG_*/?LOG from logger.hrl expand, on every OTP release from 24 on, to
 %%
 %%     case logger:allow(Level, ?MODULE) of
 %%         true -> erlang:apply(logger, macro_log, [?LOCATION, Level | Args]);
 %%         false -> ok
 %%     end
 %%
-%% with apply/3 or a direct logger:macro_log/N call in other OTP releases. Every
-%% constant in it is the call site's line, level or location, so no test can
-%% tell its mutants apart, and the report is a log line rather than behaviour.
-%% The whole expansion, the user's arguments included, yields no mutants.
-is_logger_macro(Node) ->
-    erl_syntax:type(Node) =:= case_expr andalso
-        call_target(erl_syntax:case_expr_argument(Node)) =:= {logger, allow, 2} andalso
-        is_logger_macro_clauses(erl_syntax:case_expr_clauses(Node)).
-
-is_logger_macro_clauses([True, False]) ->
-    clause_shape(True) =:= {true, macro_log} andalso clause_shape(False) =:= {false, ok};
-is_logger_macro_clauses(_Clauses) ->
-    false.
-
-clause_shape(Clause) ->
-    case
-        {
-            erl_syntax:clause_patterns(Clause),
-            erl_syntax:clause_guard(Clause),
-            erl_syntax:clause_body(Clause)
-        }
-    of
-        {[Pattern], none, [Body]} -> {atom_value(Pattern), body_shape(Body)};
-        _ -> none
-    end.
-
-body_shape(Body) ->
-    case call_target(Body) of
-        {logger, macro_log, _Arity} -> macro_log;
-        {erlang, apply, 3} -> applied_function(Body);
-        {apply, 3} -> applied_function(Body);
-        _ -> atom_value(Body)
-    end.
-
-applied_function(Call) ->
-    case erl_syntax:application_arguments(Call) of
-        [Module, Function, _Args] ->
-            case {atom_value(Module), atom_value(Function)} of
-                {logger, macro_log} -> macro_log;
-                _ -> none
+%% The scaffolding's constants are the call site's line, level and location,
+%% which no test can tell apart, so only what the caller wrote is collected:
+%% each of Args, and Level where it is an expression rather than an atom. The
+%% paths are child-index steps from the case node, as splice/3 follows them.
+-spec logger_macro_arguments(erl_syntax:syntaxTree()) ->
+    {ok, [{[path_step()], erl_syntax:syntaxTree()}]} | false.
+logger_macro_arguments(Node) ->
+    case erl_syntax:type(Node) of
+        case_expr ->
+            case erl_syntax:subtrees(Node) of
+                [[Allow], [True, False]] ->
+                    case {allow_level(Allow), macro_log_arguments(True), is_false_ok(False)} of
+                        {{ok, Level}, {ok, Arguments}, true} ->
+                            {ok,
+                                [{[{1, 1} | Steps], Part} || {Steps, Part} <- Level] ++
+                                    [{[{2, 1} | Steps], Part} || {Steps, Part} <- Arguments]};
+                        _ ->
+                            false
+                    end;
+                _ ->
+                    false
             end;
         _ ->
-            none
+            false
+    end.
+
+allow_level(Allow) ->
+    case {call_target(Allow), erl_syntax:subtrees(Allow)} of
+        {{logger, allow, 2}, [[_Operator], [Level, _Module]]} ->
+            case erl_syntax:type(Level) of
+                atom -> {ok, []};
+                _ -> {ok, [{[{2, 1}], Level}]}
+            end;
+        _ ->
+            false
+    end.
+
+macro_log_arguments(Clause) ->
+    case {clause_atom(Clause), erl_syntax:subtrees(Clause)} of
+        {true, [[_Pattern], [Body]]} ->
+            case {call_target(Body), erl_syntax:subtrees(Body)} of
+                {{erlang, apply, 3}, [[_Operator], [Module, Function, Arguments]]} ->
+                    case {atom_value(Module), atom_value(Function)} of
+                        {logger, macro_log} -> user_arguments(Arguments);
+                        _ -> false
+                    end;
+                _ ->
+                    false
+            end;
+        _ ->
+            false
+    end.
+
+%% [?LOCATION, Level | Args]: the first two elements are the macro's own.
+user_arguments(List) ->
+    case {erl_syntax:type(List), erl_syntax:subtrees(List)} of
+        {list, [[_Location, _Level | Arguments]]} ->
+            {ok, [
+                {[{2, 1}, {2, 3}, {1, Index}], Argument}
+             || {Index, Argument} <- lists:enumerate(3, Arguments)
+            ]};
+        _ ->
+            false
+    end.
+
+is_false_ok(Clause) ->
+    case {clause_atom(Clause), erl_syntax:clause_body(Clause)} of
+        {false, [Body]} -> atom_value(Body) =:= ok;
+        _ -> false
+    end.
+
+clause_atom(Clause) ->
+    case {erl_syntax:clause_patterns(Clause), erl_syntax:clause_guard(Clause)} of
+        {[Pattern], none} -> atom_value(Pattern);
+        _ -> none
     end.
 
 call_target(Node) ->
@@ -167,8 +205,6 @@ call_target(Node) ->
                         atom_value(erl_syntax:module_qualifier_body(Operator)),
                         Arity
                     };
-                atom ->
-                    {erl_syntax:atom_value(Operator), Arity};
                 _ ->
                     none
             end;

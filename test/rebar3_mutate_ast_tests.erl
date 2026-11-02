@@ -116,17 +116,17 @@ test_functions_are_not_mutated_test() ->
     ?assertEqual([6], Lines),
     file:delete(File).
 
-logger_macros_are_not_mutated_test() ->
+logger_macro_scaffolding_is_not_mutated_test() ->
     File = write_module(
         "logging_target",
         "-module(logging_target).\n"
         "-export([f/1]).\n"
         "-include_lib(\"kernel/include/logger.hrl\").\n"
         "f(N) ->\n"
-        "    ?LOG_WARNING(#{event => f, n => N + 1, retries => 3}),\n"
+        "    ?LOG_WARNING(#{event => f, n => N}),\n"
         "    ?LOG_INFO(\"n ~p\", [N]),\n"
         "    ?LOG_ERROR(\"n ~p\", [N], #{domain => [app]}),\n"
-        "    ?LOG(notice, #{ok => true}),\n"
+        "    ?LOG(notice, #{event => g}),\n"
         "    N * 2.\n"
     ),
     {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
@@ -134,25 +134,50 @@ logger_macros_are_not_mutated_test() ->
     ?assertEqual([9], lists:usort([rebar3_mutate_ast:get_point_line(P) || P <- Points])),
     file:delete(File).
 
-%% Earlier OTP releases spell the macro body as apply/3 or a direct call.
-logger_macro_variants_are_not_mutated_test() ->
+%% A call inside a log report still runs, so it is code a test can pin down.
+logger_macro_arguments_are_mutated_test() ->
     File = write_module(
-        "logging_variants_target",
-        "-module(logging_variants_target).\n"
-        "-export([f/0, g/0]).\n"
-        "f() ->\n"
-        "    case logger:allow(info, ?MODULE) of\n"
-        "        true -> apply(logger, macro_log, [#{line => 5}, info, #{a => 1}]);\n"
-        "        false -> ok\n"
-        "    end.\n"
-        "g() ->\n"
-        "    case logger:allow(info, ?MODULE) of\n"
-        "        true -> logger:macro_log(#{line => 10}, info, #{a => 1});\n"
-        "        false -> ok\n"
-        "    end.\n"
+        "logging_arguments_target",
+        "-module(logging_arguments_target).\n"
+        "-export([f/1]).\n"
+        "-include_lib(\"kernel/include/logger.hrl\").\n"
+        "f(Amount) ->\n"
+        "    ?LOG_DEBUG(#{charged => charge(Amount * 2)}),\n"
+        "    ok.\n"
+        "charge(X) -> X.\n"
+    ),
+    {ok, Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
+    Points = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic, op_constant]),
+    ?assertEqual(
+        [{5, op_arithmetic}, {5, op_constant}, {5, op_constant}, {5, op_constant}],
+        lists:sort([
+            {rebar3_mutate_ast:get_point_line(P), rebar3_mutate_ast:get_point_operator(P)}
+         || P <- Points
+        ])
+    ),
+    [
+        ?assertMatch(
+            {ok, _},
+            rebar3_mutate_runner:compile_mutant(Module, rebar3_mutate_ast:apply_mutation(Forms, P))
+        )
+     || P <- Points
+    ],
+    file:delete(File).
+
+logger_macro_level_expression_is_mutated_once_test() ->
+    File = write_module(
+        "logging_level_target",
+        "-module(logging_level_target).\n"
+        "-export([f/1]).\n"
+        "-include_lib(\"kernel/include/logger.hrl\").\n"
+        "f(N) ->\n"
+        "    ?LOG(level(N), #{n => N}).\n"
+        "level(_) -> info.\n"
     ),
     {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
-    ?assertEqual([], rebar3_mutate_ast:mutation_points(Forms, rebar3_mutate_operators:all())),
+    [Point] = rebar3_mutate_ast:mutation_points(Forms, [op_statement_delete]),
+    Description = lists:flatten(rebar3_mutate_ast:describe_mutation(Point)),
+    ?assertNotEqual(nomatch, string:find(Description, "level(N) -> ok")),
     file:delete(File).
 
 handwritten_logger_allow_case_is_mutated_test() ->
