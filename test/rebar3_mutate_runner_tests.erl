@@ -170,16 +170,50 @@ application_whose_shutdown_hangs_is_killed() ->
         ),
         ?assert(erlang:monotonic_time(millisecond) - Start < 15000),
         ?assertNot(lists:keymember(App, 1, application:which_applications())),
-        ?assertEqual(undefined, whereis(mutate_test_hang_child)),
+        ?assertEqual(undefined, whereis(Child)),
         ?assertMatch({ok, _Ms}, rebar3_mutate_runner:run_baseline(Module, {eunit, [Checks]}, 5000))
     after
-        kill_registered([mutate_test_hang_sup, mutate_test_hang_child]),
+        kill_registered([App, Child]),
         await_stopped(App),
         _ = application:unload(App),
         cleanup(Checks, ChecksFile),
         cleanup(Starter, StarterFile),
         cleanup(App, AppFile),
         cleanup(Child, ChildFile),
+        cleanup(Module, File)
+    end.
+
+%% Every application a run started shares one stop budget, so three that each
+%% hang on shutdown cost the budget once rather than three per-app bounds.
+stop_budget_is_shared_across_applications_test_() ->
+    {timeout, 60, fun stop_budget_is_shared_across_applications/0}.
+
+stop_budget_is_shared_across_applications() ->
+    {Module, Forms, File} = build(mutate_test_budget_target, bare_source()),
+    Apps = [
+        hanging_application(
+            list_to_atom("mutate_test_budget_app" ++ integer_to_list(N)),
+            list_to_atom("mutate_test_budget_child" ++ integer_to_list(N))
+        )
+     || N <- [1, 2, 3]
+    ],
+    {Starter, _, StarterFile} = build(
+        mutate_test_budget_starter, apps_starter_source([App || {App, _, _} <- Apps])
+    ),
+    try
+        [First | _] = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic]),
+        MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
+        Start = erlang:monotonic_time(millisecond),
+        ?assertEqual(
+            timed_out,
+            rebar3_mutate_runner:run_mutant(Module, MutatedForms, {eunit, [Starter]}, 300)
+        ),
+        ?assert(erlang:monotonic_time(millisecond) - Start < 13000),
+        Running = application:which_applications(),
+        ?assertEqual([], [App || {App, _, _} <- Apps, lists:keymember(App, 1, Running)])
+    after
+        cleanup(Starter, StarterFile),
+        [remove_hanging_application(App) || App <- Apps],
         cleanup(Module, File)
     end.
 
@@ -204,7 +238,7 @@ stuck_application_stop_in_a_test_is_timed_out() ->
             rebar3_mutate_runner:run_mutant(Module, MutatedForms, {eunit, [Checks]}, 300)
         )
     after
-        kill_registered([mutate_test_hang_sup, mutate_test_hang_child]),
+        kill_registered([App, Child]),
         await_stopped(App),
         _ = application:unload(App),
         cleanup(Checks, ChecksFile),
@@ -556,7 +590,7 @@ hanging_app_source(Child) ->
     "-behaviour(application).\n"
     "-behaviour(supervisor).\n"
     "-export([start/2, stop/1, init/1]).\n"
-    "start(_Type, _Args) -> supervisor:start_link({local, mutate_test_hang_sup}, ?MODULE, []).\n"
+    "start(_Type, _Args) -> supervisor:start_link({local, ?MODULE}, ?MODULE, []).\n"
     "stop(_State) -> ok.\n"
     "init([]) ->\n"
     "    Child = #{id => child, start => {" ++ atom_to_list(Child) ++
@@ -566,7 +600,7 @@ hanging_app_source(Child) ->
 hanging_child_source() ->
     "-behaviour(gen_server).\n"
     "-export([start_link/0, init/1, handle_call/3, handle_cast/2, terminate/2]).\n"
-    "start_link() -> gen_server:start_link({local, mutate_test_hang_child}, ?MODULE, [], []).\n"
+    "start_link() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).\n"
     "init([]) -> process_flag(trap_exit, true), {ok, []}.\n"
     "handle_call(_Request, _From, State) -> {reply, ok, State}.\n"
     "handle_cast(_Request, State) -> {noreply, State}.\n"
@@ -614,6 +648,31 @@ build(Module, Body) ->
     {module, Module} = code:load_file(Module),
     {ok, Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
     {Module, Forms, File}.
+
+hanging_application(App, Child) ->
+    {Child, _, ChildFile} = build(Child, hanging_child_source()),
+    {App, _, AppFile} = build(App, hanging_app_source(Child)),
+    ok = load_test_application(App, [App, Child]),
+    {App, {Child, ChildFile}, AppFile}.
+
+remove_hanging_application({App, {Child, ChildFile}, AppFile}) ->
+    kill_registered([App, Child]),
+    await_stopped(App),
+    _ = application:unload(App),
+    cleanup(App, AppFile),
+    cleanup(Child, ChildFile).
+
+apps_starter_source(Apps) ->
+    Names = lists:join(", ", [atom_to_list(App) || App <- Apps]),
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "started_test_() ->\n"
+    "    {timeout, 60, fun() ->\n"
+    "        [ok = application:start(App) || App <- [" ++ Names ++
+        "]],\n"
+        "        timer:sleep(infinity)\n"
+        "    end}.\n"
+        "-endif.\n".
 
 load_test_application(App, Modules) ->
     application:load(

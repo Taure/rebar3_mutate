@@ -13,7 +13,8 @@
 
 -include_lib("kernel/include/logger.hrl").
 
--define(APPLICATION_STOP_TIMEOUT, 10000).
+-define(APPLICATION_STOP_BUDGET, 10000).
+-define(APPLICATION_STOP_TIMEOUT, 5000).
 -define(APPLICATION_CONTROLLER_TIMEOUT, 2000).
 -define(MASTER_EXIT_TIMEOUT, 1000).
 
@@ -241,7 +242,11 @@ running_applications() ->
 stop_applications_started(timeout, {ok, Before}) ->
     case running_applications() of
         {ok, Running} ->
-            _ = [stop_application(App) || App <- Running, not lists:member(App, Before)],
+            Deadline = erlang:monotonic_time(millisecond) + ?APPLICATION_STOP_BUDGET,
+            _ = [
+                stop_application(App, Deadline)
+             || App <- Running, not lists:member(App, Before)
+            ],
             ok;
         busy ->
             ?LOG_WARNING(#{what => application_controller_busy}),
@@ -252,14 +257,16 @@ stop_applications_started(_Verdict, _Before) ->
 
 %% application:stop/1 waits as long as the application's shutdown takes, and a
 %% child with shutdown => infinity that never exits would hang the whole run.
-%% Past the bound, the application's processes and then its master are
-%% killed, which ends the pending stop.
--spec stop_application(atom()) -> ok.
-stop_application(App) ->
+%% Every stop after one run shares one deadline, each getting at most
+%% ?APPLICATION_STOP_TIMEOUT of it. Past that, the application is killed,
+%% which ends the pending stop.
+-spec stop_application(atom(), integer()) -> ok.
+stop_application(App, Deadline) ->
+    Wait = min(?APPLICATION_STOP_TIMEOUT, max(0, Deadline - erlang:monotonic_time(millisecond))),
     {Stopper, MRef} = spawn_monitor(fun() -> application:stop(App) end),
     receive
         {'DOWN', MRef, process, Stopper, _Reason} -> ok
-    after ?APPLICATION_STOP_TIMEOUT ->
+    after Wait ->
         ?LOG_WARNING(#{what => application_stop_overdue, application => App}),
         kill_application(application_controller:get_master(App)),
         receive
