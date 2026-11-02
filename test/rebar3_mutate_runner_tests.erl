@@ -499,12 +499,6 @@ baseline_runs_the_mapped_test_modules_test() ->
 %% Helpers
 %%====================================================================
 
-tmp_dir() ->
-    Dir = filename:join(["/tmp", "rebar3_mutate_runner_test"]),
-    filelib:ensure_dir(filename:join(Dir, "dummy")),
-    true = code:add_patha(Dir),
-    Dir.
-
 tested_source() ->
     "-export([add/2]).\n"
     "-ifdef(TEST).\n"
@@ -680,7 +674,8 @@ unrelated_checks_source() ->
     "-endif.\n".
 
 build(Module, Body) ->
-    Dir = tmp_dir(),
+    Dir = rebar3_mutate_tmp:dir(),
+    true = code:add_patha(Dir),
     File = filename:join(Dir, atom_to_list(Module) ++ ".erl"),
     Source = "-module(" ++ atom_to_list(Module) ++ ").\n" ++ Body,
     ok = file:write_file(File, Source),
@@ -756,5 +751,4 @@ await_stopped(App, Deadline) ->
 cleanup(Module, File) ->
     code:purge(Module),
     code:delete(Module),
-    file:delete(File),
-    file:delete(filename:rootname(File) ++ ".beam").
+    rebar3_mutate_tmp:remove(filename:dirname(File)).
