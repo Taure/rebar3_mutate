@@ -198,6 +198,10 @@ eunit_verdict(Tests) ->
 
 %% The worker sends before it exits, and signals between two processes keep
 %% their order, so the result is always ahead of the DOWN in the mailbox.
+%%
+%% It assumes one test run in the VM at a time, as rebar3_mutate_prv:run_points
+%% tests mutants one after another: the sweep and the application stop treat
+%% every process and application that appeared during the run as the run's.
 -spec in_worker(fun(() -> Result), pos_integer()) -> Result | fail | timeout.
 in_worker(Fun, Timeout) ->
     Parent = self(),
