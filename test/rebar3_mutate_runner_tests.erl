@@ -741,10 +741,14 @@ kill_registered(Names) ->
     ok.
 
 await_stopped(App) ->
+    await_stopped(App, erlang:monotonic_time(millisecond) + 5000).
+
+await_stopped(App, Deadline) ->
     case lists:keymember(App, 1, application:which_applications()) of
         true ->
+            ?assert(erlang:monotonic_time(millisecond) < Deadline),
             timer:sleep(10),
-            await_stopped(App);
+            await_stopped(App, Deadline);
         false ->
             ok
     end.
