@@ -196,6 +196,7 @@ in_worker(Fun, Timeout) ->
     Parent = self(),
     Ref = make_ref(),
     Before = maps:from_keys(erlang:processes(), true),
+    Running = running_applications(),
     Original = group_leader(),
     Leader = spawn(fun() -> forward_io(Original, erlang:monitor(process, Parent)) end),
     {Pid, MRef} = spawn_monitor(fun() ->
@@ -210,7 +211,28 @@ in_worker(Fun, Timeout) ->
         end,
     erlang:demonitor(MRef, [flush]),
     stop_run(Leader, Before),
+    stop_applications_started(Verdict, Running),
     Verdict.
+
+-spec running_applications() -> #{atom() => true}.
+running_applications() ->
+    maps:from_keys([App || {App, _Description, _Vsn} <- application:which_applications()], true).
+
+%% An application a test started has the application master as group leader,
+%% outside the run, and a stopped run never reaches the cleanup that would
+%% have stopped it. Left running, it keeps acting on shared state while the
+%% next mutant's tests run. A run that ended by itself had its cleanups run.
+%% which_applications/0 lists the most recently started first.
+-spec stop_applications_started(term(), #{atom() => true}) -> ok.
+stop_applications_started(timeout, Running) ->
+    _ = [
+        application:stop(App)
+     || {App, _Description, _Vsn} <- application:which_applications(),
+        not is_map_key(App, Running)
+    ],
+    ok;
+stop_applications_started(_Verdict, _Running) ->
+    ok.
 
 -spec forward_io(pid(), reference()) -> ok.
 forward_io(Original, CallerRef) ->

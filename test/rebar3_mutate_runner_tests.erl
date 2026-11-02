@@ -77,6 +77,85 @@ completed_run_leaves_no_process_behind_test() ->
         cleanup(Module, File)
     end.
 
+%% A timed-out run left going keeps writing shared state, and the next run's
+%% verdict is then decided by the overlap rather than by its own mutant.
+abandoned_run_does_not_reach_the_next_run_test() ->
+    {Module, Forms, File} = build(mutate_test_abandoned, bare_source()),
+    {Writer, _, WriterFile} = build(mutate_test_abandoned_writer, writer_source()),
+    {Checks, _, ChecksFile} = build(mutate_test_abandoned_checks, steady_checks_source()),
+    ets:new(mutate_test_side_effects, [named_table, public]),
+    try
+        [First | _] = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic]),
+        MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
+        ?assertEqual(
+            timed_out,
+            rebar3_mutate_runner:run_mutant(Module, MutatedForms, {eunit, [Writer]}, 300)
+        ),
+        ?assertMatch([{writes, _}], ets:lookup(mutate_test_side_effects, writes)),
+        ?assertMatch({ok, _Ms}, rebar3_mutate_runner:run_baseline(Module, {eunit, [Checks]}, 5000))
+    after
+        ets:delete(mutate_test_side_effects),
+        cleanup(Checks, ChecksFile),
+        cleanup(Writer, WriterFile),
+        cleanup(Module, File)
+    end.
+
+%% A setup that starts an application never reaches its cleanup when the run
+%% is stopped, and the application's processes are not part of the run.
+application_started_by_a_timed_out_run_is_stopped_test() ->
+    {Module, Forms, File} = build(mutate_test_app_target, bare_source()),
+    {App, _, AppFile} = build(mutate_test_side_app, side_app_source()),
+    {Starter, _, StarterFile} = build(mutate_test_app_starter, app_starter_source(App)),
+    {Checks, _, ChecksFile} = build(mutate_test_app_checks, steady_checks_source()),
+    ok = application:load(
+        {application, App, [
+            {description, "rebar3_mutate test application"},
+            {vsn, "1"},
+            {modules, [App]},
+            {registered, []},
+            {applications, [kernel, stdlib]},
+            {mod, {App, []}}
+        ]}
+    ),
+    ets:new(mutate_test_side_effects, [named_table, public]),
+    try
+        [First | _] = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic]),
+        MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
+        ?assertEqual(
+            timed_out,
+            rebar3_mutate_runner:run_mutant(Module, MutatedForms, {eunit, [Starter]}, 300)
+        ),
+        ?assertMatch([{writes, _}], ets:lookup(mutate_test_side_effects, writes)),
+        ?assertNot(lists:keymember(App, 1, application:which_applications())),
+        ?assertMatch({ok, _Ms}, rebar3_mutate_runner:run_baseline(Module, {eunit, [Checks]}, 5000))
+    after
+        _ = application:stop(App),
+        _ = application:unload(App),
+        ets:delete(mutate_test_side_effects),
+        cleanup(Checks, ChecksFile),
+        cleanup(Starter, StarterFile),
+        cleanup(App, AppFile),
+        cleanup(Module, File)
+    end.
+
+applications_running_before_a_timed_out_run_are_left_alone_test() ->
+    {Module, Forms, File} = build(mutate_test_app_kept, bare_source()),
+    {Checks, _, ChecksFile} = build(mutate_test_app_kept_checks, stuck_checks_source(Module)),
+    {ok, Started} = application:ensure_all_started(sasl),
+    try
+        [First | _] = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic]),
+        MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
+        ?assertEqual(
+            timed_out,
+            rebar3_mutate_runner:run_mutant(Module, MutatedForms, {eunit, [Checks]}, 300)
+        ),
+        ?assert(lists:keymember(sasl, 1, application:which_applications()))
+    after
+        _ = [application:stop(A) || A <- lists:reverse(Started)],
+        cleanup(Checks, ChecksFile),
+        cleanup(Module, File)
+    end.
+
 compile_error_test() ->
     BrokenForms = [
         {attribute, 1, module, mutate_test_bad},
@@ -365,6 +444,49 @@ helper_source(Ending) ->
         "    end}.\n"
         "end_with(passing) -> ok;\n"
         "end_with(blocking) -> receive never -> ok end.\n"
+        "-endif.\n".
+
+writer_source() ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "-export([write/1]).\n"
+    "write_test_() -> {timeout, 60, fun() -> write(0) end}.\n"
+    "write(N) ->\n"
+    "    ets:insert(mutate_test_side_effects, {writes, N}),\n"
+    "    timer:sleep(20),\n"
+    "    write(N + 1).\n"
+    "-endif.\n".
+
+%% Passes only if nothing else writes the shared table while it runs.
+steady_checks_source() ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "steady_test() ->\n"
+    "    Before = ets:lookup(mutate_test_side_effects, writes),\n"
+    "    timer:sleep(200),\n"
+    "    ?assertEqual(Before, ets:lookup(mutate_test_side_effects, writes)).\n"
+    "-endif.\n".
+
+side_app_source() ->
+    "-behaviour(application).\n"
+    "-export([start/2, stop/1]).\n"
+    "start(_Type, _Args) -> {ok, spawn_link(fun() -> write(0) end)}.\n"
+    "stop(_State) -> ok.\n"
+    "write(N) ->\n"
+    "    ets:insert(mutate_test_side_effects, {writes, N}),\n"
+    "    timer:sleep(20),\n"
+    "    write(N + 1).\n".
+
+app_starter_source(App) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "started_test_() ->\n"
+    "    {setup,\n"
+    "        fun() -> ok = application:start(" ++ atom_to_list(App) ++
+        ") end,\n"
+        "        fun(_) -> application:stop(" ++ atom_to_list(App) ++
+        ") end,\n"
+        "        {timeout, 60, fun() -> timer:sleep(infinity) end}}.\n"
         "-endif.\n".
 
 unrelated_checks_source() ->
