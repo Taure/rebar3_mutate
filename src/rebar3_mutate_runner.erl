@@ -14,6 +14,7 @@
 -include_lib("kernel/include/logger.hrl").
 
 -define(APPLICATION_STOP_TIMEOUT, 10000).
+-define(APPLICATION_CONTROLLER_TIMEOUT, 2000).
 
 -type test_spec() :: eunit | {eunit, [module()]} | {ct, atom()}.
 -type verdict() :: killed | survived | timed_out | {compile_error, term()} | {skipped, term()}.
@@ -218,24 +219,34 @@ in_worker(Fun, Timeout) ->
     stop_applications_started(Verdict, Running),
     Verdict.
 
--spec running_applications() -> #{atom() => true}.
+%% On OTP 28 application:stop/1 runs inside application_controller, so a test
+%% stuck in one leaves the controller unable to answer. Waiting on it would
+%% hang or crash the whole mutate run, so a busy controller is reported and
+%% the application stop is skipped for that run.
+-spec running_applications() -> {ok, [atom()]} | busy.
 running_applications() ->
-    maps:from_keys([App || {App, _Description, _Vsn} <- application:which_applications()], true).
+    try application:which_applications(?APPLICATION_CONTROLLER_TIMEOUT) of
+        Running -> {ok, [App || {App, _Description, _Vsn} <- Running]}
+    catch
+        exit:{timeout, _} -> busy
+    end.
 
 %% An application a test started has the application master as group leader,
 %% outside the run, and a stopped run never reaches the cleanup that would
 %% have stopped it. Left running, it keeps acting on shared state while the
 %% next mutant's tests run. A run that ended by itself had its cleanups run.
 %% which_applications/0 lists the most recently started first.
--spec stop_applications_started(term(), #{atom() => true}) -> ok.
-stop_applications_started(timeout, Running) ->
-    _ = [
-        stop_application(App)
-     || {App, _Description, _Vsn} <- application:which_applications(),
-        not is_map_key(App, Running)
-    ],
-    ok;
-stop_applications_started(_Verdict, _Running) ->
+-spec stop_applications_started(term(), {ok, [atom()]} | busy) -> ok.
+stop_applications_started(timeout, {ok, Before}) ->
+    case running_applications() of
+        {ok, Running} ->
+            _ = [stop_application(App) || App <- Running, not lists:member(App, Before)],
+            ok;
+        busy ->
+            ?LOG_WARNING(#{what => application_controller_busy}),
+            ok
+    end;
+stop_applications_started(_Verdict, _Before) ->
     ok.
 
 %% application:stop/1 waits as long as the application's shutdown takes, and a

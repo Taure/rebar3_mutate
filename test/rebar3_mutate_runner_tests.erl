@@ -183,6 +183,36 @@ application_whose_shutdown_hangs_is_killed() ->
         cleanup(Module, File)
     end.
 
+%% On OTP 28 application:stop/1 runs inside application_controller, so a test
+%% stuck in one leaves the controller unable to answer which_applications/0.
+%% The run is still recorded as timed out.
+stuck_application_stop_in_a_test_is_timed_out_test_() ->
+    {timeout, 60, fun stuck_application_stop_in_a_test_is_timed_out/0}.
+
+stuck_application_stop_in_a_test_is_timed_out() ->
+    {Module, Forms, File} = build(mutate_test_busy_target, bare_source()),
+    {Child, _, ChildFile} = build(mutate_test_busy_child, hanging_child_source()),
+    {App, _, AppFile} = build(mutate_test_busy_app, hanging_app_source(Child)),
+    {Checks, _, ChecksFile} = build(mutate_test_busy_checks, app_stopper_source(App)),
+    ok = load_test_application(App, [App, Child]),
+    ok = application:start(App),
+    try
+        [First | _] = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic]),
+        MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
+        ?assertEqual(
+            timed_out,
+            rebar3_mutate_runner:run_mutant(Module, MutatedForms, {eunit, [Checks]}, 300)
+        )
+    after
+        kill_registered([mutate_test_hang_sup, mutate_test_hang_child]),
+        await_stopped(App),
+        _ = application:unload(App),
+        cleanup(Checks, ChecksFile),
+        cleanup(App, AppFile),
+        cleanup(Child, ChildFile),
+        cleanup(Module, File)
+    end.
+
 applications_running_before_a_timed_out_run_are_left_alone_test() ->
     {Module, Forms, File} = build(mutate_test_app_kept, bare_source()),
     {Checks, _, ChecksFile} = build(mutate_test_app_kept_checks, stuck_checks_source(Module)),
@@ -549,6 +579,13 @@ app_start_checks_source(App) ->
         ")).\n"
         "-endif.\n".
 
+app_stopper_source(App) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "stop_test_() -> {timeout, 60, fun() -> application:stop(" ++ atom_to_list(App) ++
+        ") end}.\n"
+        "-endif.\n".
+
 app_starter_source(App) ->
     "-ifdef(TEST).\n"
     "-include_lib(\"eunit/include/eunit.hrl\").\n"
@@ -577,6 +614,18 @@ build(Module, Body) ->
     {module, Module} = code:load_file(Module),
     {ok, Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
     {Module, Forms, File}.
+
+load_test_application(App, Modules) ->
+    application:load(
+        {application, App, [
+            {description, "rebar3_mutate test application"},
+            {vsn, "1"},
+            {modules, Modules},
+            {registered, []},
+            {applications, [kernel, stdlib]},
+            {mod, {App, []}}
+        ]}
+    ).
 
 kill_registered(Names) ->
     _ = [
