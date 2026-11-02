@@ -204,6 +204,7 @@ in_worker(Fun, Timeout) ->
     Ref = make_ref(),
     Before = maps:from_keys(erlang:processes(), true),
     Running = running_applications(),
+    Masters = application_masters(),
     Original = group_leader(),
     Leader = spawn(fun() -> forward_io(Original, erlang:monitor(process, Parent)) end),
     {Pid, MRef} = spawn_monitor(fun() ->
@@ -218,7 +219,7 @@ in_worker(Fun, Timeout) ->
         end,
     erlang:demonitor(MRef, [flush]),
     stop_run(Leader, Before),
-    stop_applications_started(Verdict, Running),
+    stop_applications_started(Verdict, Running, Masters),
     Verdict.
 
 %% On OTP 28 application:stop/1 runs inside application_controller, so a test
@@ -233,27 +234,55 @@ running_applications() ->
         exit:{timeout, _} -> busy
     end.
 
+%% Read from application_controller's table rather than asked of the process,
+%% so it answers even while the controller is busy.
+-spec application_masters() -> #{pid() => atom()}.
+application_masters() ->
+    maps:from_list([
+        {Master, App}
+     || {App, _Description, _Vsn} <- application:loaded_applications(),
+        Master <- [application_controller:get_master(App)],
+        is_pid(Master)
+    ]).
+
 %% An application a test started has the application master as group leader,
 %% outside the run, and a stopped run never reaches the cleanup that would
 %% have stopped it. Left running, it keeps acting on shared state while the
 %% next mutant's tests run. A run that ended by itself had its cleanups run.
 %% which_applications/0 lists the most recently started first.
--spec stop_applications_started(term(), {ok, [atom()]} | busy) -> ok.
-stop_applications_started(timeout, {ok, Before}) ->
+%%
+%% One the run left still starting has a master but is not running yet, and
+%% application:stop/1 does not reach it. Killing its processes makes the start
+%% fail, which frees the controller to start it again for the next run.
+-spec stop_applications_started(timeout | term(), {ok, [atom()]} | busy, #{pid() => atom()}) ->
+    ok.
+stop_applications_started(timeout, {ok, Before}, MastersBefore) ->
     case running_applications() of
         {ok, Running} ->
+            Starting = [
+                {Master, App}
+             || {Master, App} <- maps:to_list(application_masters()),
+                not is_map_key(Master, MastersBefore),
+                not lists:member(App, Running)
+            ],
             Deadline = erlang:monotonic_time(millisecond) + ?APPLICATION_STOP_BUDGET,
             _ = [
                 stop_application(App, Deadline)
              || App <- Running, not lists:member(App, Before)
             ],
+            _ = [abandon_start(Master, App) || {Master, App} <- Starting],
             ok;
         busy ->
             ?LOG_WARNING(#{what => application_controller_busy}),
             ok
     end;
-stop_applications_started(_Verdict, _Before) ->
+stop_applications_started(_Verdict, _Before, _MastersBefore) ->
     ok.
+
+-spec abandon_start(pid(), atom()) -> ok.
+abandon_start(Master, App) ->
+    ?LOG_WARNING(#{what => application_start_abandoned, application => App}),
+    kill_application(Master).
 
 %% application:stop/1 waits as long as the application's shutdown takes, and a
 %% child with shutdown => infinity that never exits would hang the whole run.

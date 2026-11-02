@@ -217,6 +217,39 @@ stop_budget_is_shared_across_applications() ->
         cleanup(Module, File)
     end.
 
+%% A test stopped while its application is still in start/2 leaves a master
+%% that is not running yet; until it is gone the next start of the same
+%% application waits on it.
+application_still_starting_is_abandoned_test_() ->
+    {timeout, 60, fun application_still_starting_is_abandoned/0}.
+
+application_still_starting_is_abandoned() ->
+    {Module, Forms, File} = build(mutate_test_starting_target, bare_source()),
+    {App, _, AppFile} = build(mutate_test_starting_app, blocking_start_app_source()),
+    {Starter, _, StarterFile} = build(mutate_test_starting_starter, app_starter_source(App)),
+    {Checks, _, ChecksFile} = build(mutate_test_starting_checks, app_start_checks_source(App)),
+    ok = load_test_application(App, [App]),
+    persistent_term:put(App, block),
+    try
+        [First | _] = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic]),
+        MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
+        ?assertEqual(
+            timed_out,
+            rebar3_mutate_runner:run_mutant(Module, MutatedForms, {eunit, [Starter]}, 300)
+        ),
+        ?assertEqual(undefined, application_controller:get_master(App)),
+        persistent_term:put(App, start),
+        ?assertMatch({ok, _Ms}, rebar3_mutate_runner:run_baseline(Module, {eunit, [Checks]}, 5000))
+    after
+        _ = application:stop(App),
+        _ = application:unload(App),
+        _ = persistent_term:erase(App),
+        cleanup(Checks, ChecksFile),
+        cleanup(Starter, StarterFile),
+        cleanup(App, AppFile),
+        cleanup(Module, File)
+    end.
+
 %% On OTP 28 application:stop/1 runs inside application_controller, so a test
 %% stuck in one leaves the controller unable to answer which_applications/0.
 %% The run is still recorded as timed out.
@@ -612,6 +645,14 @@ app_start_checks_source(App) ->
     "started_test() -> ?assertEqual(ok, application:start(" ++ atom_to_list(App) ++
         ")).\n"
         "-endif.\n".
+
+blocking_start_app_source() ->
+    "-behaviour(application).\n"
+    "-export([start/2, stop/1]).\n"
+    "start(_Type, _Args) -> start(persistent_term:get(?MODULE)).\n"
+    "stop(_State) -> ok.\n"
+    "start(block) -> receive never -> {error, never} end;\n"
+    "start(start) -> {ok, spawn_link(fun() -> receive stop -> ok end end)}.\n".
 
 app_stopper_source(App) ->
     "-ifdef(TEST).\n"
