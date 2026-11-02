@@ -265,7 +265,7 @@ stop_applications_started(timeout, {ok, Before}, MastersBefore) ->
         {ok, Running} ->
             Starting = [
                 {Master, App}
-             || {Master, App} <- maps:to_list(application_masters()),
+             || Master := App <- application_masters(),
                 not is_map_key(Master, MastersBefore),
                 not lists:member(App, Running)
             ],
