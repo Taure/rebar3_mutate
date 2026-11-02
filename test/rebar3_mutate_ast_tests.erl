@@ -116,6 +116,61 @@ test_functions_are_not_mutated_test() ->
     ?assertEqual([6], Lines),
     file:delete(File).
 
+logger_macros_are_not_mutated_test() ->
+    File = write_module(
+        "logging_target",
+        "-module(logging_target).\n"
+        "-export([f/1]).\n"
+        "-include_lib(\"kernel/include/logger.hrl\").\n"
+        "f(N) ->\n"
+        "    ?LOG_WARNING(#{event => f, n => N + 1, retries => 3}),\n"
+        "    ?LOG_INFO(\"n ~p\", [N]),\n"
+        "    ?LOG_ERROR(\"n ~p\", [N], #{domain => [app]}),\n"
+        "    ?LOG(notice, #{ok => true}),\n"
+        "    N * 2.\n"
+    ),
+    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
+    Points = rebar3_mutate_ast:mutation_points(Forms, rebar3_mutate_operators:all()),
+    ?assertEqual([9], lists:usort([rebar3_mutate_ast:get_point_line(P) || P <- Points])),
+    file:delete(File).
+
+%% Earlier OTP releases spell the macro body as apply/3 or a direct call.
+logger_macro_variants_are_not_mutated_test() ->
+    File = write_module(
+        "logging_variants_target",
+        "-module(logging_variants_target).\n"
+        "-export([f/0, g/0]).\n"
+        "f() ->\n"
+        "    case logger:allow(info, ?MODULE) of\n"
+        "        true -> apply(logger, macro_log, [#{line => 5}, info, #{a => 1}]);\n"
+        "        false -> ok\n"
+        "    end.\n"
+        "g() ->\n"
+        "    case logger:allow(info, ?MODULE) of\n"
+        "        true -> logger:macro_log(#{line => 10}, info, #{a => 1});\n"
+        "        false -> ok\n"
+        "    end.\n"
+    ),
+    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
+    ?assertEqual([], rebar3_mutate_ast:mutation_points(Forms, rebar3_mutate_operators:all())),
+    file:delete(File).
+
+handwritten_logger_allow_case_is_mutated_test() ->
+    File = write_module(
+        "logging_handwritten_target",
+        "-module(logging_handwritten_target).\n"
+        "-export([f/1]).\n"
+        "f(N) ->\n"
+        "    case logger:allow(info, ?MODULE) of\n"
+        "        true -> N + 1;\n"
+        "        false -> ok\n"
+        "    end.\n"
+    ),
+    {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
+    Points = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic]),
+    ?assertEqual([5], [rebar3_mutate_ast:get_point_line(P) || P <- Points]),
+    file:delete(File).
+
 every_point_reports_a_real_line_test() ->
     File = write_module("attr_target", drift_source()),
     {ok, _Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),

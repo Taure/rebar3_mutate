@@ -78,6 +78,12 @@ get_point_operator(#mutation_point{operator = Op}) -> Op.
 %%====================================================================
 
 collect(Node, Path, Source, ParentLine, Operators) ->
+    case is_logger_macro(Node) of
+        true -> [];
+        false -> collect_node(Node, Path, Source, ParentLine, Operators)
+    end.
+
+collect_node(Node, Path, Source, ParentLine, Operators) ->
     Line = node_line(Node, ParentLine),
     Children = lists:append([
         collect(Child, Path ++ [{GroupIndex, ChildIndex}], Source, Line, Operators)
@@ -96,6 +102,85 @@ collect(Node, Path, Source, ParentLine, Operators) ->
      || {Op, Mutated} <- rebar3_mutate_operators:mutate_node(Node, Operators)
     ],
     Children ++ Own.
+
+%% ?LOG_*/?LOG from logger.hrl expand to
+%%
+%%     case logger:allow(Level, ?MODULE) of
+%%         true -> erlang:apply(logger, macro_log, [?LOCATION, Level | Args]);
+%%         false -> ok
+%%     end
+%%
+%% with apply/3 or a direct logger:macro_log/N call in other OTP releases. Every
+%% constant in it is the call site's line, level or location, so no test can
+%% tell its mutants apart, and the report is a log line rather than behaviour.
+%% The whole expansion, the user's arguments included, yields no mutants.
+is_logger_macro(Node) ->
+    erl_syntax:type(Node) =:= case_expr andalso
+        call_target(erl_syntax:case_expr_argument(Node)) =:= {logger, allow, 2} andalso
+        is_logger_macro_clauses(erl_syntax:case_expr_clauses(Node)).
+
+is_logger_macro_clauses([True, False]) ->
+    clause_shape(True) =:= {true, macro_log} andalso clause_shape(False) =:= {false, ok};
+is_logger_macro_clauses(_Clauses) ->
+    false.
+
+clause_shape(Clause) ->
+    case
+        {
+            erl_syntax:clause_patterns(Clause),
+            erl_syntax:clause_guard(Clause),
+            erl_syntax:clause_body(Clause)
+        }
+    of
+        {[Pattern], none, [Body]} -> {atom_value(Pattern), body_shape(Body)};
+        _ -> none
+    end.
+
+body_shape(Body) ->
+    case call_target(Body) of
+        {logger, macro_log, _Arity} -> macro_log;
+        {erlang, apply, 3} -> applied_function(Body);
+        {apply, 3} -> applied_function(Body);
+        _ -> atom_value(Body)
+    end.
+
+applied_function(Call) ->
+    case erl_syntax:application_arguments(Call) of
+        [Module, Function, _Args] ->
+            case {atom_value(Module), atom_value(Function)} of
+                {logger, macro_log} -> macro_log;
+                _ -> none
+            end;
+        _ ->
+            none
+    end.
+
+call_target(Node) ->
+    case erl_syntax:type(Node) of
+        application ->
+            Arity = length(erl_syntax:application_arguments(Node)),
+            Operator = erl_syntax:application_operator(Node),
+            case erl_syntax:type(Operator) of
+                module_qualifier ->
+                    {
+                        atom_value(erl_syntax:module_qualifier_argument(Operator)),
+                        atom_value(erl_syntax:module_qualifier_body(Operator)),
+                        Arity
+                    };
+                atom ->
+                    {erl_syntax:atom_value(Operator), Arity};
+                _ ->
+                    none
+            end;
+        _ ->
+            none
+    end.
+
+atom_value(Node) ->
+    case erl_syntax:type(Node) of
+        atom -> erl_syntax:atom_value(Node);
+        _ -> none
+    end.
 
 splice(_Node, [], New) ->
     New;
