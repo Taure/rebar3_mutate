@@ -11,6 +11,10 @@
     contributes_tests/1
 ]).
 
+-include_lib("kernel/include/logger.hrl").
+
+-define(APPLICATION_STOP_TIMEOUT, 10000).
+
 -type test_spec() :: eunit | {eunit, [module()]} | {ct, atom()}.
 -type verdict() :: killed | survived | timed_out | {compile_error, term()} | {skipped, term()}.
 
@@ -226,12 +230,46 @@ running_applications() ->
 -spec stop_applications_started(term(), #{atom() => true}) -> ok.
 stop_applications_started(timeout, Running) ->
     _ = [
-        application:stop(App)
+        stop_application(App)
      || {App, _Description, _Vsn} <- application:which_applications(),
         not is_map_key(App, Running)
     ],
     ok;
 stop_applications_started(_Verdict, _Running) ->
+    ok.
+
+%% application:stop/1 waits as long as the application's shutdown takes, and a
+%% child with shutdown => infinity that never exits would hang the whole run.
+%% Past the bound, the application's processes and then its master are
+%% killed, which ends the pending stop.
+-spec stop_application(atom()) -> ok.
+stop_application(App) ->
+    {Stopper, MRef} = spawn_monitor(fun() -> application:stop(App) end),
+    receive
+        {'DOWN', MRef, process, Stopper, _Reason} -> ok
+    after ?APPLICATION_STOP_TIMEOUT ->
+        ?LOG_WARNING(#{what => application_stop_overdue, application => App}),
+        kill_application(application_controller:get_master(App)),
+        receive
+            {'DOWN', MRef, process, Stopper, _Reason} -> ok
+        after ?APPLICATION_STOP_TIMEOUT ->
+            kill_and_await([{Stopper, MRef}])
+        end
+    end.
+
+-spec kill_application(term()) -> ok.
+kill_application(Master) when is_pid(Master) ->
+    Self = self(),
+    Members = [
+        Pid
+     || Pid <- erlang:processes(),
+        Pid =/= Self,
+        Pid =/= Master,
+        process_info(Pid, group_leader) =:= {group_leader, Master}
+    ],
+    kill_and_await([{Pid, erlang:monitor(process, Pid)} || Pid <- Members]),
+    kill_and_await([{Master, erlang:monitor(process, Master)}]);
+kill_application(_NoMaster) ->
     ok.
 
 -spec forward_io(pid(), reference()) -> ok.

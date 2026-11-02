@@ -138,6 +138,51 @@ application_started_by_a_timed_out_run_is_stopped_test() ->
         cleanup(Module, File)
     end.
 
+%% A child with shutdown => infinity that never exits makes application:stop/1
+%% wait forever. The stop is bounded, and past the bound the application is
+%% killed so the next run can start it again.
+application_whose_shutdown_hangs_is_killed_test_() ->
+    {timeout, 60, fun application_whose_shutdown_hangs_is_killed/0}.
+
+application_whose_shutdown_hangs_is_killed() ->
+    {Module, Forms, File} = build(mutate_test_hang_target, bare_source()),
+    {Child, _, ChildFile} = build(mutate_test_hang_child, hanging_child_source()),
+    {App, _, AppFile} = build(mutate_test_hang_app, hanging_app_source(Child)),
+    {Starter, _, StarterFile} = build(mutate_test_hang_starter, app_starter_source(App)),
+    {Checks, _, ChecksFile} = build(mutate_test_hang_checks, app_start_checks_source(App)),
+    ok = application:load(
+        {application, App, [
+            {description, "rebar3_mutate test application"},
+            {vsn, "1"},
+            {modules, [App, Child]},
+            {registered, []},
+            {applications, [kernel, stdlib]},
+            {mod, {App, []}}
+        ]}
+    ),
+    try
+        [First | _] = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic]),
+        MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
+        Start = erlang:monotonic_time(millisecond),
+        ?assertEqual(
+            timed_out,
+            rebar3_mutate_runner:run_mutant(Module, MutatedForms, {eunit, [Starter]}, 300)
+        ),
+        ?assert(erlang:monotonic_time(millisecond) - Start < 15000),
+        ?assertNot(lists:keymember(App, 1, application:which_applications())),
+        ?assertEqual(undefined, whereis(mutate_test_hang_child)),
+        ?assertMatch({ok, _Ms}, rebar3_mutate_runner:run_baseline(Module, {eunit, [Checks]}, 5000))
+    after
+        kill_registered([mutate_test_hang_sup, mutate_test_hang_child]),
+        await_stopped(App),
+        _ = application:unload(App),
+        cleanup(Checks, ChecksFile),
+        cleanup(Starter, StarterFile),
+        cleanup(App, AppFile),
+        cleanup(Child, ChildFile),
+        cleanup(Module, File)
+    end.
+
 applications_running_before_a_timed_out_run_are_left_alone_test() ->
     {Module, Forms, File} = build(mutate_test_app_kept, bare_source()),
     {Checks, _, ChecksFile} = build(mutate_test_app_kept_checks, stuck_checks_source(Module)),
@@ -477,6 +522,33 @@ side_app_source() ->
     "    timer:sleep(20),\n"
     "    write(N + 1).\n".
 
+hanging_app_source(Child) ->
+    "-behaviour(application).\n"
+    "-behaviour(supervisor).\n"
+    "-export([start/2, stop/1, init/1]).\n"
+    "start(_Type, _Args) -> supervisor:start_link({local, mutate_test_hang_sup}, ?MODULE, []).\n"
+    "stop(_State) -> ok.\n"
+    "init([]) ->\n"
+    "    Child = #{id => child, start => {" ++ atom_to_list(Child) ++
+        ", start_link, []}, shutdown => infinity},\n"
+        "    {ok, {#{}, [Child]}}.\n".
+
+hanging_child_source() ->
+    "-behaviour(gen_server).\n"
+    "-export([start_link/0, init/1, handle_call/3, handle_cast/2, terminate/2]).\n"
+    "start_link() -> gen_server:start_link({local, mutate_test_hang_child}, ?MODULE, [], []).\n"
+    "init([]) -> process_flag(trap_exit, true), {ok, []}.\n"
+    "handle_call(_Request, _From, State) -> {reply, ok, State}.\n"
+    "handle_cast(_Request, State) -> {noreply, State}.\n"
+    "terminate(_Reason, _State) -> receive never -> ok end.\n".
+
+app_start_checks_source(App) ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "started_test() -> ?assertEqual(ok, application:start(" ++ atom_to_list(App) ++
+        ")).\n"
+        "-endif.\n".
+
 app_starter_source(App) ->
     "-ifdef(TEST).\n"
     "-include_lib(\"eunit/include/eunit.hrl\").\n"
@@ -505,6 +577,28 @@ build(Module, Body) ->
     {module, Module} = code:load_file(Module),
     {ok, Module, Forms} = rebar3_mutate_ast:parse_file(File, rebar3_mutate_opts:epp([], [])),
     {Module, Forms, File}.
+
+kill_registered(Names) ->
+    _ = [
+        begin
+            MRef = erlang:monitor(process, Pid),
+            exit(Pid, kill),
+            receive
+                {'DOWN', MRef, process, Pid, _} -> ok
+            end
+        end
+     || Name <- Names, Pid <- [whereis(Name)], is_pid(Pid)
+    ],
+    ok.
+
+await_stopped(App) ->
+    case lists:keymember(App, 1, application:which_applications()) of
+        true ->
+            timer:sleep(10),
+            await_stopped(App);
+        false ->
+            ok
+    end.
 
 cleanup(Module, File) ->
     code:purge(Module),
