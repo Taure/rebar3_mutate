@@ -157,7 +157,7 @@ Mutants are tested one at a time. The mapped suites must also be repeatable, eac
 | `op_negate_condition` | Wrap `andalso`/`orelse` with `not`, remove existing `not` |
 | `op_list` | `++` <-> `--`, `hd` <-> `tl` (including `erlang:hd/1` and `erlang:tl/1`) |
 
-Only function bodies defined in the module's own source are mutated. Attributes carry no runtime behaviour, so mutating a `-spec` type atom or an `-export` arity produces a mutant that is either inert or a guaranteed compile error. Test functions (`*_test/0`, `*_test_/0`) and anything pulled in from an include are skipped for the same reason.
+Only function bodies defined in the module's own source are mutated. Attributes carry no runtime behaviour, so mutating a `-spec` type atom or an `-export` arity produces a mutant that is either inert or a guaranteed compile error. Test functions (`*_test/0`, `*_test_/0`) and anything pulled in from an include are skipped for the same reason. The scaffolding of logger macro calls (`?LOG_*` and `?LOG` from `kernel/include/logger.hrl`) is skipped: the expansion's level, line and location constants and its `logger:allow/2` case are not something a test can observe. The arguments you pass are mutated as usual, so a call or expression inside a log report, or a level given as an expression, still produces mutants.
 
 ## Baseline
 

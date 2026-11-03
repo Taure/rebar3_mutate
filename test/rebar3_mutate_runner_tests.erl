@@ -77,6 +77,29 @@ completed_run_leaves_no_process_behind_test() ->
         cleanup(Module, File)
     end.
 
+%% A timed-out run left going keeps writing shared state, and the next run's
+%% verdict is then decided by the overlap rather than by its own mutant.
+abandoned_run_does_not_reach_the_next_run_test() ->
+    {Module, Forms, File} = build(mutate_test_abandoned, bare_source()),
+    {Writer, _, WriterFile} = build(mutate_test_abandoned_writer, writer_source()),
+    {Checks, _, ChecksFile} = build(mutate_test_abandoned_checks, steady_checks_source()),
+    ets:new(mutate_test_side_effects, [named_table, public]),
+    try
+        [First | _] = rebar3_mutate_ast:mutation_points(Forms, [op_arithmetic]),
+        MutatedForms = rebar3_mutate_ast:apply_mutation(Forms, First),
+        ?assertEqual(
+            timed_out,
+            rebar3_mutate_runner:run_mutant(Module, MutatedForms, {eunit, [Writer]}, 300)
+        ),
+        ?assertMatch([{writes, _}], ets:lookup(mutate_test_side_effects, writes)),
+        ?assertMatch({ok, _Ms}, rebar3_mutate_runner:run_baseline(Module, {eunit, [Checks]}, 5000))
+    after
+        ets:delete(mutate_test_side_effects),
+        cleanup(Checks, ChecksFile),
+        cleanup(Writer, WriterFile),
+        cleanup(Module, File)
+    end.
+
 compile_error_test() ->
     BrokenForms = [
         {attribute, 1, module, mutate_test_bad},
@@ -278,12 +301,6 @@ baseline_runs_the_mapped_test_modules_test() ->
 %% Helpers
 %%====================================================================
 
-tmp_dir() ->
-    Dir = filename:join(["/tmp", "rebar3_mutate_runner_test"]),
-    filelib:ensure_dir(filename:join(Dir, "dummy")),
-    true = code:add_patha(Dir),
-    Dir.
-
 tested_source() ->
     "-export([add/2]).\n"
     "-ifdef(TEST).\n"
@@ -367,6 +384,27 @@ helper_source(Ending) ->
         "end_with(blocking) -> receive never -> ok end.\n"
         "-endif.\n".
 
+writer_source() ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "-export([write/1]).\n"
+    "write_test_() -> {timeout, 60, fun() -> write(0) end}.\n"
+    "write(N) ->\n"
+    "    ets:insert(mutate_test_side_effects, {writes, N}),\n"
+    "    timer:sleep(20),\n"
+    "    write(N + 1).\n"
+    "-endif.\n".
+
+%% Passes only if nothing else writes the shared table while it runs.
+steady_checks_source() ->
+    "-ifdef(TEST).\n"
+    "-include_lib(\"eunit/include/eunit.hrl\").\n"
+    "steady_test() ->\n"
+    "    Before = ets:lookup(mutate_test_side_effects, writes),\n"
+    "    timer:sleep(200),\n"
+    "    ?assertEqual(Before, ets:lookup(mutate_test_side_effects, writes)).\n"
+    "-endif.\n".
+
 unrelated_checks_source() ->
     "-ifdef(TEST).\n"
     "-include_lib(\"eunit/include/eunit.hrl\").\n"
@@ -374,7 +412,8 @@ unrelated_checks_source() ->
     "-endif.\n".
 
 build(Module, Body) ->
-    Dir = tmp_dir(),
+    Dir = rebar3_mutate_tmp:dir(),
+    true = code:add_patha(Dir),
     File = filename:join(Dir, atom_to_list(Module) ++ ".erl"),
     Source = "-module(" ++ atom_to_list(Module) ++ ").\n" ++ Body,
     ok = file:write_file(File, Source),
@@ -387,5 +426,4 @@ build(Module, Body) ->
 cleanup(Module, File) ->
     code:purge(Module),
     code:delete(Module),
-    file:delete(File),
-    file:delete(filename:rootname(File) ++ ".beam").
+    rebar3_mutate_tmp:remove(filename:dirname(File)).

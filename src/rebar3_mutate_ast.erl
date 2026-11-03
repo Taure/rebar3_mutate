@@ -78,6 +78,18 @@ get_point_operator(#mutation_point{operator = Op}) -> Op.
 %%====================================================================
 
 collect(Node, Path, Source, ParentLine, Operators) ->
+    case logger_macro_arguments(Node) of
+        {ok, Arguments} ->
+            Line = node_line(Node, ParentLine),
+            lists:append([
+                collect(Argument, Path ++ RelativePath, Source, Line, Operators)
+             || {RelativePath, Argument} <- Arguments
+            ]);
+        false ->
+            collect_node(Node, Path, Source, ParentLine, Operators)
+    end.
+
+collect_node(Node, Path, Source, ParentLine, Operators) ->
     Line = node_line(Node, ParentLine),
     Children = lists:append([
         collect(Child, Path ++ [{GroupIndex, ChildIndex}], Source, Line, Operators)
@@ -96,6 +108,115 @@ collect(Node, Path, Source, ParentLine, Operators) ->
      || {Op, Mutated} <- rebar3_mutate_operators:mutate_node(Node, Operators)
     ],
     Children ++ Own.
+
+%% ?LOG_*/?LOG from logger.hrl expand, on every OTP release from 24 on, to
+%%
+%%     case logger:allow(Level, ?MODULE) of
+%%         true -> erlang:apply(logger, macro_log, [?LOCATION, Level | Args]);
+%%         false -> ok
+%%     end
+%%
+%% The scaffolding's constants are the call site's line, level and location,
+%% which no test can tell apart, so only what the caller wrote is collected:
+%% each of Args, and Level where it is an expression rather than an atom. The
+%% paths are child-index steps from the case node, as splice/3 follows them.
+-spec logger_macro_arguments(erl_syntax:syntaxTree()) ->
+    {ok, [{[path_step()], erl_syntax:syntaxTree()}]} | false.
+logger_macro_arguments(Node) ->
+    case erl_syntax:type(Node) of
+        case_expr ->
+            case erl_syntax:subtrees(Node) of
+                [[Allow], [True, False]] ->
+                    case {allow_level(Allow), macro_log_arguments(True), is_false_ok(False)} of
+                        {{ok, Level}, {ok, Arguments}, true} ->
+                            {ok,
+                                [{[{1, 1} | Steps], Part} || {Steps, Part} <- Level] ++
+                                    [{[{2, 1} | Steps], Part} || {Steps, Part} <- Arguments]};
+                        _ ->
+                            false
+                    end;
+                _ ->
+                    false
+            end;
+        _ ->
+            false
+    end.
+
+allow_level(Allow) ->
+    case {call_target(Allow), erl_syntax:subtrees(Allow)} of
+        {{logger, allow, 2}, [[_Operator], [Level, _Module]]} ->
+            case erl_syntax:type(Level) of
+                atom -> {ok, []};
+                _ -> {ok, [{[{2, 1}], Level}]}
+            end;
+        _ ->
+            false
+    end.
+
+macro_log_arguments(Clause) ->
+    case {clause_atom(Clause), erl_syntax:subtrees(Clause)} of
+        {true, [[_Pattern], [Body]]} ->
+            case {call_target(Body), erl_syntax:subtrees(Body)} of
+                {{erlang, apply, 3}, [[_Operator], [Module, Function, Arguments]]} ->
+                    case {atom_value(Module), atom_value(Function)} of
+                        {logger, macro_log} -> user_arguments(Arguments);
+                        _ -> false
+                    end;
+                _ ->
+                    false
+            end;
+        _ ->
+            false
+    end.
+
+%% [?LOCATION, Level | Args]: the first two elements are the macro's own.
+user_arguments(List) ->
+    case {erl_syntax:type(List), erl_syntax:subtrees(List)} of
+        {list, [[_Location, _Level | Arguments]]} ->
+            {ok, [
+                {[{2, 1}, {2, 3}, {1, Index}], Argument}
+             || {Index, Argument} <- lists:enumerate(3, Arguments)
+            ]};
+        _ ->
+            false
+    end.
+
+is_false_ok(Clause) ->
+    case {clause_atom(Clause), erl_syntax:clause_body(Clause)} of
+        {false, [Body]} -> atom_value(Body) =:= ok;
+        _ -> false
+    end.
+
+clause_atom(Clause) ->
+    case {erl_syntax:clause_patterns(Clause), erl_syntax:clause_guard(Clause)} of
+        {[Pattern], none} -> atom_value(Pattern);
+        _ -> none
+    end.
+
+call_target(Node) ->
+    case erl_syntax:type(Node) of
+        application ->
+            Arity = length(erl_syntax:application_arguments(Node)),
+            Operator = erl_syntax:application_operator(Node),
+            case erl_syntax:type(Operator) of
+                module_qualifier ->
+                    {
+                        atom_value(erl_syntax:module_qualifier_argument(Operator)),
+                        atom_value(erl_syntax:module_qualifier_body(Operator)),
+                        Arity
+                    };
+                _ ->
+                    none
+            end;
+        _ ->
+            none
+    end.
+
+atom_value(Node) ->
+    case erl_syntax:type(Node) of
+        atom -> erl_syntax:atom_value(Node);
+        _ -> none
+    end.
 
 splice(_Node, [], New) ->
     New;
