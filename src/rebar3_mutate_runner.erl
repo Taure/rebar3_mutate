@@ -11,13 +11,6 @@
     contributes_tests/1
 ]).
 
--include_lib("kernel/include/logger.hrl").
-
--define(APPLICATION_STOP_BUDGET, 10000).
--define(APPLICATION_STOP_TIMEOUT, 5000).
--define(APPLICATION_CONTROLLER_TIMEOUT, 2000).
--define(MASTER_EXIT_TIMEOUT, 1000).
-
 -type test_spec() :: eunit | {eunit, [module()]} | {ct, atom()}.
 -type verdict() :: killed | survived | timed_out | {compile_error, term()} | {skipped, term()}.
 
@@ -198,17 +191,11 @@ eunit_verdict(Tests) ->
 
 %% The worker sends before it exits, and signals between two processes keep
 %% their order, so the result is always ahead of the DOWN in the mailbox.
-%%
-%% It assumes one test run in the VM at a time, as rebar3_mutate_prv:run_points
-%% tests mutants one after another: the sweep and the application stop treat
-%% every process and application that appeared during the run as the run's.
 -spec in_worker(fun(() -> Result), pos_integer()) -> Result | fail | timeout.
 in_worker(Fun, Timeout) ->
     Parent = self(),
     Ref = make_ref(),
     Before = maps:from_keys(erlang:processes(), true),
-    Running = running_applications(),
-    Masters = application_masters(),
     Original = group_leader(),
     Leader = spawn(fun() -> forward_io(Original, erlang:monitor(process, Parent)) end),
     {Pid, MRef} = spawn_monitor(fun() ->
@@ -223,132 +210,7 @@ in_worker(Fun, Timeout) ->
         end,
     erlang:demonitor(MRef, [flush]),
     stop_run(Leader, Before),
-    stop_applications_started(Verdict, Running, Masters),
     Verdict.
-
-%% On OTP 28 application:stop/1 runs inside application_controller, so a test
-%% stuck in one leaves the controller unable to answer. Waiting on it would
-%% hang or crash the whole mutate run, so a busy controller is reported and
-%% the application stop is skipped for that run.
--spec running_applications() -> {ok, [atom()]} | busy.
-running_applications() ->
-    try application:which_applications(?APPLICATION_CONTROLLER_TIMEOUT) of
-        Running -> {ok, [App || {App, _Description, _Vsn} <- Running]}
-    catch
-        exit:{timeout, _} -> busy
-    end.
-
-%% Read from application_controller's table rather than asked of the process,
-%% so it answers even while the controller is busy.
--spec application_masters() -> #{pid() => atom()}.
-application_masters() ->
-    maps:from_list([
-        {Master, App}
-     || {App, _Description, _Vsn} <- application:loaded_applications(),
-        Master <- [application_controller:get_master(App)],
-        is_pid(Master)
-    ]).
-
-%% An application a test started has the application master as group leader,
-%% outside the run, and a stopped run never reaches the cleanup that would
-%% have stopped it. Left running, it keeps acting on shared state while the
-%% next mutant's tests run. A run that ended by itself had its cleanups run.
-%% which_applications/0 lists the most recently started first.
-%%
-%% One the run left still starting has a master but is not running yet, and
-%% application:stop/1 does not reach it. Killing its processes makes the start
-%% fail, which frees the controller to start it again for the next run.
--spec stop_applications_started(timeout | term(), {ok, [atom()]} | busy, #{pid() => atom()}) ->
-    ok.
-stop_applications_started(timeout, {ok, Before}, MastersBefore) ->
-    case running_applications() of
-        {ok, Running} ->
-            Starting = [
-                {Master, App}
-             || Master := App <- application_masters(),
-                not is_map_key(Master, MastersBefore),
-                not lists:member(App, Running)
-            ],
-            Deadline = erlang:monotonic_time(millisecond) + ?APPLICATION_STOP_BUDGET,
-            _ = [
-                stop_application(App, Deadline)
-             || App <- Running, not lists:member(App, Before)
-            ],
-            _ = [abandon_start(Master, App) || {Master, App} <- Starting],
-            ok;
-        busy ->
-            ?LOG_WARNING(#{what => application_controller_busy}),
-            ok
-    end;
-stop_applications_started(_Verdict, _Before, _MastersBefore) ->
-    ok.
-
--spec abandon_start(pid(), atom()) -> ok.
-abandon_start(Master, App) ->
-    ?LOG_WARNING(#{what => application_start_abandoned, application => App}),
-    kill_application(Master).
-
-%% application:stop/1 waits as long as the application's shutdown takes, and a
-%% child with shutdown => infinity that never exits would hang the whole run.
-%% Every stop after one run shares one deadline, each getting at most
-%% ?APPLICATION_STOP_TIMEOUT of it. Past that, the application is killed,
-%% which ends the pending stop.
--spec stop_application(atom(), integer()) -> ok.
-stop_application(App, Deadline) ->
-    Wait = min(?APPLICATION_STOP_TIMEOUT, max(0, Deadline - erlang:monotonic_time(millisecond))),
-    {Stopper, MRef} = spawn_monitor(fun() -> application:stop(App) end),
-    receive
-        {'DOWN', MRef, process, Stopper, _Reason} -> ok
-    after Wait ->
-        ?LOG_WARNING(#{what => application_stop_overdue, application => App}),
-        kill_application(application_controller:get_master(App)),
-        receive
-            {'DOWN', MRef, process, Stopper, _Reason} -> ok
-        after ?MASTER_EXIT_TIMEOUT ->
-            %% Not seen in practice, since a dead master answers the pending
-            %% stop, but the stopper must not outlive the sweep either way.
-            kill_and_await([{Stopper, MRef}])
-        end
-    end.
-
-%% The application's processes are the ones whose group leader is its master.
-%% Killing them, the master's own loop among them, makes the master exit by
-%% itself, which is what lets application_controller finish the pending stop.
--spec kill_application(pid() | undefined) -> ok.
-kill_application(Master) when is_pid(Master) ->
-    MRef = erlang:monitor(process, Master),
-    kill_members(Master),
-    receive
-        {'DOWN', MRef, process, Master, _Reason} -> ok
-    after ?MASTER_EXIT_TIMEOUT ->
-        %% Deliberate safety net: no master has been seen to outlive its
-        %% processes, but one that did would keep the stop pending forever.
-        kill_and_await([{Master, MRef}]),
-        kill_members(Master)
-    end;
-kill_application(undefined) ->
-    ok.
-
-%% As application_master:kill_all_procs/0 does, the pass repeats until it finds
-%% nothing, since a process can spawn another while the previous pass runs.
--spec kill_members(pid()) -> ok.
-kill_members(Master) ->
-    Self = self(),
-    case
-        [
-            Pid
-         || Pid <- erlang:processes(),
-            Pid =/= Self,
-            Pid =/= Master,
-            process_info(Pid, group_leader) =:= {group_leader, Master}
-        ]
-    of
-        [] ->
-            ok;
-        Members ->
-            kill_and_await([{Pid, erlang:monitor(process, Pid)} || Pid <- Members]),
-            kill_members(Master)
-    end.
 
 -spec forward_io(pid(), reference()) -> ok.
 forward_io(Original, CallerRef) ->
