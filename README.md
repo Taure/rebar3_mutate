@@ -7,7 +7,7 @@
   <a href="https://erlef.org/slack-invite/erlanger"><img src="https://img.shields.io/badge/chat-Erlang%20Slack-4A154B.svg" alt="Slack"></a>
 </p>
 
-Mutation testing plugin for rebar3. Systematically applies small code transformations (mutants) and runs your tests to verify they catch them.
+Mutation testing plugin for rebar3, the Erlang counterpart to PIT (Java), Stryker (JavaScript, .NET) and mutmut (Python). Systematically applies small code transformations (mutants) and runs your tests to verify they catch them.
 
 ## Installation
 
